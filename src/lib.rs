@@ -2,6 +2,7 @@
 
 pub mod app;
 pub mod theme;
+pub mod workspace;
 
 /// Human-readable product name used in the UI and package metadata.
 pub const PRODUCT_NAME: &str = "Codex Dirigent";
