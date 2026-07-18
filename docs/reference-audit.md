@@ -80,12 +80,11 @@ confirmed in the UI; unrelated pre-existing changes are never silently reset.
 
 ## Phase acceptance checklist
 
-- [ ] Clean Rust/macOS application shell, formatting, linting, tests, packaging
-- [ ] Local Git workspace, bounded tree, read-only viewer, status and diff
-- [ ] Cue types and review/accept/reject/commit state machine
-- [ ] Codex JSON execution, progress, cancellation, follow-up, scripts
-- [ ] Minimal atomic settings with obsolete-setting tolerance
-- [ ] Codex identity, macOS interactions, accessibility, light/dark appearance
-- [ ] Installation, prerequisite, usage, and release documentation
-- [ ] Clean build/test/lint plus forbidden-term and artifact audits
-
+- [x] Clean Rust/macOS application shell, formatting, linting, tests, packaging
+- [x] Local Git workspace, bounded tree, read-only viewer, status and diff
+- [x] Cue types and review/accept/reject/commit state machine
+- [x] Codex JSON execution, progress, cancellation, follow-up, scripts
+- [x] Minimal atomic settings with obsolete-setting tolerance
+- [x] Codex identity, macOS interactions, accessibility, light/dark appearance
+- [x] Installation, prerequisite, usage, and release documentation
+- [x] Clean build/test/lint plus forbidden-term and artifact audits
