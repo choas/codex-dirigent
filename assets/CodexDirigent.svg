@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-label="Codex Dirigent app icon">
+  <rect width="512" height="512" rx="112" fill="#101816"/>
+  <rect x="52" y="52" width="408" height="408" rx="82" fill="#1d2724"/>
+  <path d="M126 236h260v40H126z" fill="#10a37f"/>
+  <circle cx="256" cy="256" r="66" fill="#10a37f"/>
+  <circle cx="256" cy="256" r="28" fill="#eaf7f3"/>
+  <path d="M134 184c46-70 127-96 211-60" fill="none" stroke="#eaf7f3" stroke-width="26" stroke-linecap="round"/>
+  <path d="M378 328c-46 70-127 96-211 60" fill="none" stroke="#eaf7f3" stroke-width="26" stroke-linecap="round"/>
+</svg>

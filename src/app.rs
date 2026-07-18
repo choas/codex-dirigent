@@ -1,4 +1,5 @@
 use eframe::egui;
+use std::fmt::Write as _;
 use std::path::PathBuf;
 
 use crate::{
@@ -66,6 +67,7 @@ pub struct CodexDirigentApp {
     settings: Settings,
     settings_path: Option<PathBuf>,
     settings_open: bool,
+    confirm_reject: bool,
     active_run: Option<CodexRun>,
     active_run_id: Option<u64>,
     run_log: Vec<String>,
@@ -90,6 +92,7 @@ impl Default for CodexDirigentApp {
             settings: Settings::default(),
             settings_path: None,
             settings_open: false,
+            confirm_reject: false,
             active_run: None,
             active_run_id: None,
             run_log: Vec::new(),
@@ -165,7 +168,7 @@ impl CodexDirigentApp {
         match workspace.read_text(&path) {
             Ok(text) => {
                 self.selected_file = Some(path);
-                self.file_text = text;
+                self.file_text = with_line_numbers(&text);
                 self.error = None;
             }
             Err(error) => self.error = Some(error.to_string()),
@@ -191,7 +194,9 @@ impl CodexDirigentApp {
             ui.heading(PRODUCT_NAME);
             ui.add_space(16.0);
             for stage in WorkflowStage::ALL {
-                ui.selectable_value(&mut self.stage, stage, stage.label());
+                ui.add_enabled_ui(self.stage_enabled(stage), |ui| {
+                    ui.selectable_value(&mut self.stage, stage, stage.label());
+                });
             }
             ui.separator();
             if ui
@@ -207,18 +212,48 @@ impl CodexDirigentApp {
             if ui.button("Settings…").clicked() {
                 self.settings_open = true;
             }
-            if let Some(workspace) = &self.workspace {
-                ui.separator();
-                ui.label(format!(
-                    "{} · {}",
-                    workspace.branch(),
-                    workspace.root().display()
-                ));
-            }
         });
         if let Some(error) = &self.error {
             ui.colored_label(ui.visuals().error_fg_color, error);
         }
+    }
+
+    fn stage_enabled(&self, stage: WorkflowStage) -> bool {
+        match stage {
+            WorkflowStage::Browse => true,
+            WorkflowStage::Cue => self.workspace.is_some() && self.active_run.is_none(),
+            WorkflowStage::Run => self.session.is_some(),
+            WorkflowStage::Review => self.session.as_ref().is_some_and(|session| {
+                matches!(
+                    session.state(),
+                    SessionState::Reviewing { .. }
+                        | SessionState::Accepted
+                        | SessionState::Rejected
+                        | SessionState::Committed { .. }
+                )
+            }),
+            WorkflowStage::Commit => self.session.as_ref().is_some_and(|session| {
+                matches!(
+                    session.state(),
+                    SessionState::Accepted | SessionState::Committed { .. }
+                )
+            }),
+        }
+    }
+
+    fn status_bar(&self, ui: &mut egui::Ui) {
+        ui.horizontal(|ui| {
+            if let Some(workspace) = &self.workspace {
+                ui.strong(workspace.branch());
+                ui.separator();
+                ui.label(workspace.root().display().to_string());
+            } else {
+                ui.label("No repository open");
+            }
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.label("⌘O Open  ·  ⌘R Refresh  ·  ⌘, Settings");
+            });
+        });
     }
 
     fn workspace_ui(&mut self, ui: &mut egui::Ui) {
@@ -375,22 +410,7 @@ impl CodexDirigentApp {
                 .add_enabled(reviewing || accepted, egui::Button::new("Reject Changes"))
                 .clicked()
             {
-                let result = self
-                    .workspace
-                    .as_mut()
-                    .ok_or_else(|| "no repository is open".to_owned())
-                    .and_then(|workspace| {
-                        workspace.reject_run_changes().map_err(|e| e.to_string())
-                    });
-                match result {
-                    Ok(()) => {
-                        if let Some(session) = &mut self.session {
-                            let _ = session.reject();
-                        }
-                        self.refresh();
-                    }
-                    Err(error) => self.error = Some(error),
-                }
+                self.confirm_reject = true;
             }
         });
 
@@ -600,6 +620,55 @@ impl CodexDirigentApp {
         }
     }
 
+    fn reject_changes(&mut self) {
+        let result = self
+            .workspace
+            .as_mut()
+            .ok_or_else(|| "no repository is open".to_owned())
+            .and_then(|workspace| {
+                workspace
+                    .reject_run_changes()
+                    .map_err(|error| error.to_string())
+            });
+        match result {
+            Ok(()) => {
+                if let Some(session) = &mut self.session {
+                    let _ = session.reject();
+                }
+                self.refresh();
+                self.error = None;
+            }
+            Err(error) => self.error = Some(error),
+        }
+    }
+
+    fn reject_confirmation_ui(&mut self, context: &egui::Context) {
+        if !self.confirm_reject {
+            return;
+        }
+        egui::Window::new("Reject Codex changes?")
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
+            .show(context, |ui| {
+                ui.label("This restores the clean Git baseline captured before this cue.");
+                ui.label("All tracked and untracked changes from the run will be discarded.");
+                ui.horizontal(|ui| {
+                    if ui.button("Cancel").clicked() {
+                        self.confirm_reject = false;
+                    }
+                    if ui
+                        .button("Reject and Restore")
+                        .on_hover_text("Permanently discard this run's working-tree changes")
+                        .clicked()
+                    {
+                        self.reject_changes();
+                        self.confirm_reject = false;
+                    }
+                });
+            });
+    }
+
     fn settings_ui(&mut self, context: &egui::Context) {
         if !self.settings_open {
             return;
@@ -643,6 +712,14 @@ impl CodexDirigentApp {
         if context.input_mut(|input| input.consume_key(egui::Modifiers::COMMAND, egui::Key::R)) {
             self.refresh();
         }
+        if context.input_mut(|input| input.consume_key(egui::Modifiers::COMMAND, egui::Key::Comma))
+        {
+            self.settings_open = true;
+        }
+        if context.input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::Escape)) {
+            self.settings_open = false;
+            self.confirm_reject = false;
+        }
     }
 }
 
@@ -654,8 +731,12 @@ impl eframe::App for CodexDirigentApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         self.shortcuts(ui.ctx());
         self.settings_ui(ui.ctx());
+        self.reject_confirmation_ui(ui.ctx());
         egui::Panel::top("toolbar").show_inside(ui, |ui| {
             self.toolbar(ui);
+        });
+        egui::Panel::bottom("status_bar").show_inside(ui, |ui| {
+            self.status_bar(ui);
         });
 
         if self.workspace.is_some() {
@@ -681,6 +762,19 @@ impl eframe::App for CodexDirigentApp {
     }
 }
 
+fn with_line_numbers(text: &str) -> String {
+    let line_count = text.lines().count().max(1);
+    let width = line_count.ilog10() as usize + 1;
+    let mut numbered = String::with_capacity(text.len() + line_count * (width + 3));
+    for (index, line) in text.lines().enumerate() {
+        let _ = writeln!(numbered, "{:>width$} │ {line}", index + 1);
+    }
+    if text.is_empty() {
+        numbered.push_str("1 │ ");
+    }
+    numbered
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -699,5 +793,16 @@ mod tests {
             .map(WorkflowStage::label)
             .collect();
         assert_eq!(labels, ["Browse", "Cue", "Run", "Review", "Commit"]);
+    }
+
+    #[test]
+    fn viewer_adds_aligned_line_numbers() {
+        let mut source = String::new();
+        for line in 1..=12 {
+            let _ = writeln!(source, "line {line}");
+        }
+        let numbered = with_line_numbers(&source);
+        assert!(numbered.starts_with(" 1 │ line 1"));
+        assert!(numbered.contains("12 │ line 12"));
     }
 }
