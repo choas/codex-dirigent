@@ -637,6 +637,7 @@ dependencies = [
  "blake3",
  "eframe",
  "rfd",
+ "serde",
  "serde_json",
  "shlex 1.3.0",
  "tempfile",

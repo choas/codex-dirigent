@@ -3,9 +3,10 @@ use std::path::PathBuf;
 
 use crate::{
     PRODUCT_NAME,
-    codex::{self, CodexConfig, CodexEvent, CodexRun},
+    codex::{self, CodexEvent, CodexRun},
     cue::{Cue, CueTarget},
     review::{Session, SessionState},
+    settings::{self, Settings},
     theme,
     workspace::Workspace,
 };
@@ -62,7 +63,9 @@ pub struct CodexDirigentApp {
     session: Option<Session>,
     commit_message: String,
     follow_up_text: String,
-    codex_config: CodexConfig,
+    settings: Settings,
+    settings_path: Option<PathBuf>,
+    settings_open: bool,
     active_run: Option<CodexRun>,
     active_run_id: Option<u64>,
     run_log: Vec<String>,
@@ -84,7 +87,9 @@ impl Default for CodexDirigentApp {
             session: None,
             commit_message: String::new(),
             follow_up_text: String::new(),
-            codex_config: CodexConfig::default(),
+            settings: Settings::default(),
+            settings_path: None,
+            settings_open: false,
             active_run: None,
             active_run_id: None,
             run_log: Vec::new(),
@@ -93,6 +98,39 @@ impl Default for CodexDirigentApp {
 }
 
 impl CodexDirigentApp {
+    #[must_use]
+    pub fn load() -> Self {
+        let path = settings::default_path().ok();
+        let (loaded_settings, warning) = path.as_ref().map_or_else(
+            || {
+                (
+                    Settings::default(),
+                    Some("settings location is unavailable; changes will not persist".to_owned()),
+                )
+            },
+            |settings_path| match settings::load(settings_path) {
+                Ok(settings) => (settings, None),
+                Err(error) => (
+                    Settings::default(),
+                    Some(format!("{error}; using defaults")),
+                ),
+            },
+        );
+        let recent = loaded_settings.last_repository.clone();
+        let mut app = Self {
+            settings: loaded_settings,
+            settings_path: path,
+            error: warning,
+            ..Self::default()
+        };
+        if let Some(repository) = recent
+            && repository.exists()
+        {
+            app.open_repository(&repository);
+        }
+        app
+    }
+
     fn choose_repository(&mut self) {
         if self.active_run.is_some() {
             self.error =
@@ -107,12 +145,14 @@ impl CodexDirigentApp {
     fn open_repository(&mut self, path: &std::path::Path) {
         match Workspace::open(path) {
             Ok(workspace) => {
+                self.settings.last_repository = Some(workspace.root().to_path_buf());
                 self.diff_text = workspace.working_diff().unwrap_or_default();
                 self.workspace = Some(workspace);
                 self.selected_file = None;
                 self.file_text.clear();
                 self.error = None;
                 self.stage = WorkflowStage::Browse;
+                self.save_settings();
             }
             Err(error) => self.error = Some(error.to_string()),
         }
@@ -163,6 +203,9 @@ impl CodexDirigentApp {
             }
             if ui.button("Refresh").on_hover_text("Refresh (⌘R)").clicked() {
                 self.refresh();
+            }
+            if ui.button("Settings…").clicked() {
+                self.settings_open = true;
             }
             if let Some(workspace) = &self.workspace {
                 ui.separator();
@@ -484,7 +527,7 @@ impl CodexDirigentApp {
         else {
             return;
         };
-        match codex::start(&repository, prompt, self.codex_config.clone()) {
+        match codex::start(&repository, prompt, self.settings.codex_config()) {
             Ok(run) => {
                 self.active_run = Some(run);
                 self.active_run_id = Some(run_id);
@@ -548,6 +591,51 @@ impl CodexDirigentApp {
         }
     }
 
+    fn save_settings(&mut self) {
+        let Some(path) = &self.settings_path else {
+            return;
+        };
+        if let Err(error) = settings::save(path, &self.settings) {
+            self.error = Some(error.to_string());
+        }
+    }
+
+    fn settings_ui(&mut self, context: &egui::Context) {
+        if !self.settings_open {
+            return;
+        }
+        let mut open = self.settings_open;
+        let mut should_save = false;
+        egui::Window::new("Codex Settings")
+            .open(&mut open)
+            .resizable(true)
+            .default_width(520.0)
+            .show(context, |ui| {
+                ui.label("Codex CLI path");
+                ui.text_edit_singleline(&mut self.settings.codex_cli_path);
+                ui.label("Model (blank uses Codex configuration)");
+                ui.text_edit_singleline(&mut self.settings.codex_model);
+                ui.label("Extra arguments");
+                ui.text_edit_singleline(&mut self.settings.codex_extra_arguments);
+                ui.label("Environment variable names (one per line; values are never saved)");
+                ui.add(
+                    egui::TextEdit::multiline(&mut self.settings.codex_environment_names)
+                        .desired_rows(3),
+                );
+                ui.label("Pre-run command (executable and arguments; no shell)");
+                ui.text_edit_singleline(&mut self.settings.codex_pre_run_command);
+                ui.label("Post-run command (executable and arguments; no shell)");
+                ui.text_edit_singleline(&mut self.settings.codex_post_run_command);
+                if ui.button("Save Settings").clicked() {
+                    should_save = true;
+                }
+            });
+        self.settings_open = open;
+        if should_save {
+            self.save_settings();
+        }
+    }
+
     fn shortcuts(&mut self, context: &egui::Context) {
         if context.input_mut(|input| input.consume_key(egui::Modifiers::COMMAND, egui::Key::O)) {
             self.choose_repository();
@@ -565,6 +653,7 @@ impl eframe::App for CodexDirigentApp {
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         self.shortcuts(ui.ctx());
+        self.settings_ui(ui.ctx());
         egui::Panel::top("toolbar").show_inside(ui, |ui| {
             self.toolbar(ui);
         });

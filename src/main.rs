@@ -15,7 +15,7 @@ fn main() -> eframe::Result {
         options,
         Box::new(|creation_context| {
             codex_dirigent::theme::apply(&creation_context.egui_ctx);
-            Ok(Box::<CodexDirigentApp>::default())
+            Ok(Box::new(CodexDirigentApp::load()))
         }),
     )
 }

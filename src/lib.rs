@@ -4,6 +4,7 @@ pub mod app;
 pub mod codex;
 pub mod cue;
 pub mod review;
+pub mod settings;
 pub mod theme;
 pub mod workspace;
 
