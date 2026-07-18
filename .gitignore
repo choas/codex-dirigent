@@ -1,5 +1,29 @@
+# Rust build output
 /target/
-/.DS_Store
+debug/
+**/*.rs.bk
+*.pdb
+
+# macOS metadata
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+.DocumentRevisions-V100
+.fseventsd
+.Spotlight-V100
+.TemporaryItems
+.Trashes
+.VolumeIcon.icns
+.com.apple.timemachine.donotpresent
+.AppleDB
+.AppleDesktop
+Network Trash Folder
+Temporary Items
+.apdisk
+*.icloud
+
+# Codex Dirigent local state and secrets
 /.codex-dirigent/
 *.log
 *.db
