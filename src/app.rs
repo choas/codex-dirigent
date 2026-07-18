@@ -1,7 +1,13 @@
 use eframe::egui;
 use std::path::PathBuf;
 
-use crate::{PRODUCT_NAME, theme, workspace::Workspace};
+use crate::{
+    PRODUCT_NAME,
+    cue::{Cue, CueTarget},
+    review::{Session, SessionState},
+    theme,
+    workspace::Workspace,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum WorkflowStage {
@@ -10,6 +16,13 @@ enum WorkflowStage {
     Run,
     Review,
     Commit,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CueScope {
+    Repository,
+    File,
+    Lines,
 }
 
 impl WorkflowStage {
@@ -41,6 +54,12 @@ pub struct CodexDirigentApp {
     file_text: String,
     diff_text: String,
     error: Option<String>,
+    cue_scope: CueScope,
+    cue_text: String,
+    line_start: usize,
+    line_end: usize,
+    session: Option<Session>,
+    commit_message: String,
 }
 
 impl Default for CodexDirigentApp {
@@ -52,6 +71,12 @@ impl Default for CodexDirigentApp {
             file_text: String::new(),
             diff_text: String::new(),
             error: None,
+            cue_scope: CueScope::Repository,
+            cue_text: String::new(),
+            line_start: 1,
+            line_end: 1,
+            session: None,
+            commit_message: String::new(),
         }
     }
 }
@@ -164,21 +189,10 @@ impl CodexDirigentApp {
             });
 
         egui::CentralPanel::default().show_inside(ui, |ui| {
-            if self.stage == WorkflowStage::Review {
-                ui.heading("Working tree diff");
-                ui.separator();
-                if self.diff_text.is_empty() {
-                    ui.label("No changes to review.");
-                } else {
-                    egui::ScrollArea::both().show(ui, |ui| {
-                        ui.add(
-                            egui::TextEdit::multiline(&mut self.diff_text)
-                                .font(egui::TextStyle::Monospace)
-                                .interactive(false)
-                                .desired_width(f32::INFINITY),
-                        );
-                    });
-                }
+            if self.stage == WorkflowStage::Cue {
+                self.cue_ui(ui);
+            } else if matches!(self.stage, WorkflowStage::Review | WorkflowStage::Commit) {
+                self.review_ui(ui);
             } else if let Some(path) = &self.selected_file {
                 ui.heading(path.display().to_string());
                 ui.separator();
@@ -196,6 +210,157 @@ impl CodexDirigentApp {
                 });
             }
         });
+    }
+
+    fn cue_ui(&mut self, ui: &mut egui::Ui) {
+        ui.heading("Create a cue");
+        ui.label("Codex receives this instruction with the selected repository context.");
+        ui.add_space(8.0);
+        ui.horizontal(|ui| {
+            ui.selectable_value(&mut self.cue_scope, CueScope::Repository, "Repository");
+            ui.add_enabled_ui(self.selected_file.is_some(), |ui| {
+                ui.selectable_value(&mut self.cue_scope, CueScope::File, "File");
+                ui.selectable_value(&mut self.cue_scope, CueScope::Lines, "Line range");
+            });
+        });
+        if matches!(self.cue_scope, CueScope::File | CueScope::Lines) {
+            ui.label(self.selected_file.as_ref().map_or_else(
+                || "Select a file first".to_owned(),
+                |path| path.display().to_string(),
+            ));
+        }
+        if self.cue_scope == CueScope::Lines {
+            ui.horizontal(|ui| {
+                ui.label("Lines");
+                ui.add(egui::DragValue::new(&mut self.line_start).range(1..=usize::MAX));
+                ui.label("through");
+                ui.add(egui::DragValue::new(&mut self.line_end).range(1..=usize::MAX));
+            });
+        }
+        ui.add(
+            egui::TextEdit::multiline(&mut self.cue_text)
+                .hint_text("Describe the change you want Codex to make…")
+                .desired_rows(8),
+        );
+        if ui.button("Create Cue").clicked() {
+            let target = match self.cue_scope {
+                CueScope::Repository => Some(CueTarget::Repository),
+                CueScope::File => self.selected_file.clone().map(CueTarget::File),
+                CueScope::Lines => self.selected_file.clone().map(|path| CueTarget::Lines {
+                    path,
+                    start: self.line_start,
+                    end: self.line_end,
+                }),
+            };
+            match target.map(|target| Cue::new(self.cue_text.clone(), target)) {
+                Some(Ok(cue)) => {
+                    self.session = Some(Session::new(cue));
+                    self.error = None;
+                    self.stage = WorkflowStage::Run;
+                }
+                Some(Err(error)) => self.error = Some(error.to_string()),
+                None => self.error = Some("select a file for this cue".to_owned()),
+            }
+        }
+    }
+
+    fn review_ui(&mut self, ui: &mut egui::Ui) {
+        ui.heading("Review changes");
+        if let Some(session) = &self.session {
+            ui.label(format!("State: {:?}", session.state()));
+        }
+        ui.separator();
+        egui::ScrollArea::both().max_height(420.0).show(ui, |ui| {
+            if self.diff_text.is_empty() {
+                ui.label("No changes to review.");
+            } else {
+                ui.add(
+                    egui::TextEdit::multiline(&mut self.diff_text)
+                        .font(egui::TextStyle::Monospace)
+                        .interactive(false)
+                        .desired_width(f32::INFINITY),
+                );
+            }
+        });
+        ui.separator();
+
+        let reviewing = self
+            .session
+            .as_ref()
+            .is_some_and(|session| matches!(session.state(), SessionState::Reviewing { .. }));
+        let accepted = self
+            .session
+            .as_ref()
+            .is_some_and(|session| session.state() == &SessionState::Accepted);
+        ui.horizontal(|ui| {
+            if ui
+                .add_enabled(reviewing, egui::Button::new("Accept Reviewed Diff"))
+                .clicked()
+                && let Some(session) = &mut self.session
+                && let Err(error) = session.accept(&self.diff_text)
+            {
+                self.error = Some(error.to_string());
+            }
+            if ui
+                .add_enabled(reviewing || accepted, egui::Button::new("Reject Changes"))
+                .clicked()
+            {
+                let result = self
+                    .workspace
+                    .as_mut()
+                    .ok_or_else(|| "no repository is open".to_owned())
+                    .and_then(|workspace| {
+                        workspace.reject_run_changes().map_err(|e| e.to_string())
+                    });
+                match result {
+                    Ok(()) => {
+                        if let Some(session) = &mut self.session {
+                            let _ = session.reject();
+                        }
+                        self.refresh();
+                    }
+                    Err(error) => self.error = Some(error),
+                }
+            }
+        });
+
+        if accepted {
+            ui.add_space(8.0);
+            ui.horizontal(|ui| {
+                ui.label("Commit message");
+                ui.text_edit_singleline(&mut self.commit_message);
+                if ui.button("Commit Accepted Changes").clicked() {
+                    self.commit_accepted();
+                }
+            });
+        }
+    }
+
+    fn commit_accepted(&mut self) {
+        let approval = self.session.as_ref().and_then(Session::approval).cloned();
+        let Some(approval) = approval else {
+            self.error = Some("accept the reviewed diff before committing".to_owned());
+            return;
+        };
+        let result = self
+            .workspace
+            .as_mut()
+            .ok_or_else(|| "no repository is open".to_owned())
+            .and_then(|workspace| {
+                workspace
+                    .commit_approved(&approval, &self.commit_message)
+                    .map_err(|error| error.to_string())
+            });
+        match result {
+            Ok(commit) => {
+                if let Some(session) = &mut self.session {
+                    let _ = session.mark_committed(commit);
+                }
+                self.refresh();
+                self.error = None;
+            }
+            Err(error) => self.error = Some(error),
+        }
     }
 
     fn shortcuts(&mut self, context: &egui::Context) {

@@ -6,6 +6,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
+use crate::review::ReviewApproval;
+
 const MAX_FILES: usize = 20_000;
 const MAX_TEXT_BYTES: u64 = 2 * 1024 * 1024;
 
@@ -21,6 +23,10 @@ pub enum WorkspaceError {
     BinaryFile,
     #[error("Git command failed: {0}")]
     Git(String),
+    #[error("the working tree no longer matches the accepted review")]
+    ReviewInvalidated,
+    #[error("enter a commit message")]
+    EmptyCommitMessage,
     #[error("filesystem error: {0}")]
     Io(#[from] std::io::Error),
 }
@@ -160,6 +166,88 @@ impl Workspace {
             }
         }
         Ok(diff)
+    }
+
+    /// Report whether the worktree has no staged, unstaged, or untracked files.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when Git status cannot be read.
+    pub fn is_clean(&self) -> Result<bool> {
+        Ok(self.statuses()?.is_empty())
+    }
+
+    /// Commit the exact diff represented by an explicit review approval.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the diff changed, the message is empty, or staging
+    /// and committing through Git fails.
+    pub fn commit_approved(&mut self, approval: &ReviewApproval, message: &str) -> Result<String> {
+        if message.trim().is_empty() {
+            return Err(WorkspaceError::EmptyCommitMessage);
+        }
+        if !approval.matches(&self.working_diff()?) {
+            return Err(WorkspaceError::ReviewInvalidated);
+        }
+        let add = git_output(&self.root, ["add", "-A", "--"])?;
+        if !add.status.success() {
+            return Err(git_error(&add));
+        }
+        let commit = git_output(&self.root, ["commit", "-m", message.trim(), "--"])?;
+        if !commit.status.success() {
+            return Err(git_error(&commit));
+        }
+        let hash = git_text(&self.root, ["rev-parse", "HEAD"])?
+            .trim()
+            .to_owned();
+        self.refresh()?;
+        Ok(hash)
+    }
+
+    /// Restore all changes in a worktree that was clean before a Codex run.
+    ///
+    /// The caller is responsible for enforcing that clean-baseline invariant
+    /// and obtaining explicit rejection confirmation from the user.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when Git restoration or removal of an untracked file
+    /// fails. Paths are sourced from Git and checked beneath the worktree.
+    pub fn reject_run_changes(&mut self) -> Result<()> {
+        let statuses = self.statuses()?;
+        let tracked: Vec<_> = statuses
+            .iter()
+            .filter(|(_, status)| **status != '?')
+            .map(|(path, _)| path)
+            .collect();
+        if !tracked.is_empty() {
+            let output = Command::new("git")
+                .args(["restore", "--source=HEAD", "--staged", "--worktree", "--"])
+                .args(tracked)
+                .current_dir(&self.root)
+                .env("LC_ALL", "C")
+                .output()?;
+            if !output.status.success() {
+                return Err(git_error(&output));
+            }
+        }
+        for path in statuses
+            .iter()
+            .filter(|(_, status)| **status == '?')
+            .map(|(path, _)| path)
+        {
+            let candidate = self.root.join(path);
+            if !candidate.starts_with(&self.root) {
+                return Err(WorkspaceError::OutsideRepository);
+            }
+            if candidate.symlink_metadata()?.file_type().is_dir() {
+                return Err(WorkspaceError::OutsideRepository);
+            }
+            fs::remove_file(candidate)?;
+        }
+        self.refresh()?;
+        Ok(())
     }
 
     fn statuses(&self) -> Result<HashMap<PathBuf, char>> {
@@ -358,5 +446,56 @@ mod tests {
         let parsed = parse_porcelain(b"R  new.rs\0old.rs\0?? note.txt\0");
         assert_eq!(parsed.get(Path::new("new.rs")), Some(&'R'));
         assert_eq!(parsed.get(Path::new("note.txt")), Some(&'?'));
+    }
+
+    #[test]
+    fn accepted_diff_can_commit_and_changed_diff_cannot() {
+        use crate::cue::{Cue, CueTarget};
+        use crate::review::Session;
+
+        let temp = repository();
+        fs::write(
+            temp.path().join("src/lib.rs"),
+            "pub fn value() -> u8 { 3 }\n",
+        )
+        .unwrap();
+        let mut workspace = Workspace::open(temp.path()).unwrap();
+        let diff = workspace.working_diff().unwrap();
+        let mut session = Session::new(Cue::new("change value", CueTarget::Repository).unwrap());
+        let run = session.begin_run().unwrap();
+        session.finish_run(run, "done", &diff).unwrap();
+        session.accept(&diff).unwrap();
+        let commit = workspace
+            .commit_approved(session.approval().unwrap(), "Change value")
+            .unwrap();
+        assert_eq!(commit.len(), 40);
+        assert!(workspace.is_clean().unwrap());
+
+        fs::write(
+            temp.path().join("src/lib.rs"),
+            "pub fn value() -> u8 { 4 }\n",
+        )
+        .unwrap();
+        assert!(matches!(
+            workspace.commit_approved(session.approval().unwrap(), "Wrong diff"),
+            Err(WorkspaceError::ReviewInvalidated)
+        ));
+    }
+
+    #[test]
+    fn rejection_restores_tracked_and_removes_untracked_changes() {
+        let temp = repository();
+        fs::write(temp.path().join("src/lib.rs"), "changed\n").unwrap();
+        fs::write(temp.path().join("new.txt"), "new\n").unwrap();
+        let mut workspace = Workspace::open(temp.path()).unwrap();
+        workspace.reject_run_changes().unwrap();
+        assert!(workspace.is_clean().unwrap());
+        assert!(!temp.path().join("new.txt").exists());
+        assert!(
+            workspace
+                .read_text(Path::new("src/lib.rs"))
+                .unwrap()
+                .contains("value")
+        );
     }
 }
