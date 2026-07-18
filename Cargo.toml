@@ -1,0 +1,22 @@
+[package]
+name = "codex-dirigent"
+version = "0.1.0"
+edition = "2024"
+description = "A focused native macOS workflow for reviewing Codex CLI changes"
+license = "MIT"
+rust-version = "1.92"
+
+[dependencies]
+eframe = "=0.34.1"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
