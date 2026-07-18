@@ -160,6 +160,35 @@ impl Session {
         Ok(self.start_run())
     }
 
+    /// Return from a failed or cancelled run to the last safe actionable state.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for a stale run identifier or if no run is active.
+    pub fn execution_failed(
+        &mut self,
+        run_id: u64,
+        message: impl Into<String>,
+    ) -> Result<(), ReviewError> {
+        if self.state != (SessionState::Running { run_id }) {
+            return if matches!(self.state, SessionState::Running { .. }) {
+                Err(ReviewError::StaleRun)
+            } else {
+                Err(ReviewError::InvalidTransition)
+            };
+        }
+        self.messages.push(Message {
+            speaker: Speaker::Codex,
+            text: message.into(),
+        });
+        self.state = if self.review_diff.is_empty() {
+            SessionState::Ready
+        } else {
+            SessionState::Reviewing { run_id }
+        };
+        Ok(())
+    }
+
     /// Accept only the exact diff displayed for review.
     ///
     /// # Errors
@@ -285,5 +314,16 @@ mod tests {
         session.reject().unwrap();
         assert!(session.approval().is_none());
         assert_eq!(session.state(), &SessionState::Rejected);
+    }
+
+    #[test]
+    fn failed_refinement_returns_to_review() {
+        let mut session = session();
+        let first = session.begin_run().unwrap();
+        session.finish_run(first, "done", "diff").unwrap();
+        let second = session.follow_up("try again").unwrap();
+        session.execution_failed(second, "cancelled").unwrap();
+        assert_eq!(session.state(), &SessionState::Reviewing { run_id: second });
+        assert_eq!(session.review_diff(), "diff");
     }
 }

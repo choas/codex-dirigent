@@ -3,6 +3,7 @@ use std::path::PathBuf;
 
 use crate::{
     PRODUCT_NAME,
+    codex::{self, CodexConfig, CodexEvent, CodexRun},
     cue::{Cue, CueTarget},
     review::{Session, SessionState},
     theme,
@@ -60,6 +61,11 @@ pub struct CodexDirigentApp {
     line_end: usize,
     session: Option<Session>,
     commit_message: String,
+    follow_up_text: String,
+    codex_config: CodexConfig,
+    active_run: Option<CodexRun>,
+    active_run_id: Option<u64>,
+    run_log: Vec<String>,
 }
 
 impl Default for CodexDirigentApp {
@@ -77,12 +83,22 @@ impl Default for CodexDirigentApp {
             line_end: 1,
             session: None,
             commit_message: String::new(),
+            follow_up_text: String::new(),
+            codex_config: CodexConfig::default(),
+            active_run: None,
+            active_run_id: None,
+            run_log: Vec::new(),
         }
     }
 }
 
 impl CodexDirigentApp {
     fn choose_repository(&mut self) {
+        if self.active_run.is_some() {
+            self.error =
+                Some("cancel the active Codex run before opening another repository".to_owned());
+            return;
+        }
         if let Some(path) = rfd::FileDialog::new().pick_folder() {
             self.open_repository(&path);
         }
@@ -191,6 +207,8 @@ impl CodexDirigentApp {
         egui::CentralPanel::default().show_inside(ui, |ui| {
             if self.stage == WorkflowStage::Cue {
                 self.cue_ui(ui);
+            } else if self.stage == WorkflowStage::Run {
+                self.run_ui(ui);
             } else if matches!(self.stage, WorkflowStage::Review | WorkflowStage::Commit) {
                 self.review_ui(ui);
             } else if let Some(path) = &self.selected_file {
@@ -292,6 +310,15 @@ impl CodexDirigentApp {
             .session
             .as_ref()
             .is_some_and(|session| session.state() == &SessionState::Accepted);
+        if reviewing {
+            ui.label("Refine with a follow-up instruction");
+            ui.horizontal(|ui| {
+                ui.text_edit_singleline(&mut self.follow_up_text);
+                if ui.button("Send Follow-up").clicked() {
+                    self.start_follow_up();
+                }
+            });
+        }
         ui.horizontal(|ui| {
             if ui
                 .add_enabled(reviewing, egui::Button::new("Accept Reviewed Diff"))
@@ -363,6 +390,164 @@ impl CodexDirigentApp {
         }
     }
 
+    fn run_ui(&mut self, ui: &mut egui::Ui) {
+        ui.heading("Run with Codex");
+        let state = self.session.as_ref().map(Session::state);
+        match state {
+            Some(SessionState::Ready) => {
+                ui.label("The repository must be clean so Reject can safely restore this run.");
+                if ui
+                    .add(egui::Button::new("Run Cue with Codex").fill(theme::CODEX_ACCENT))
+                    .clicked()
+                {
+                    self.start_initial_run();
+                }
+            }
+            Some(SessionState::Running { .. }) => {
+                ui.horizontal(|ui| {
+                    ui.add(egui::Spinner::new().color(theme::CODEX_ACCENT));
+                    ui.label("Codex is working…");
+                    if ui.button("Cancel").clicked()
+                        && let Some(run) = &self.active_run
+                    {
+                        run.cancel();
+                    }
+                });
+            }
+            Some(SessionState::Reviewing { .. } | SessionState::Accepted) => {
+                if ui.button("Review Changes").clicked() {
+                    self.stage = WorkflowStage::Review;
+                }
+            }
+            Some(SessionState::Rejected | SessionState::Committed { .. }) => {
+                ui.label("This cue is complete.");
+            }
+            None => {
+                ui.label("Create a cue first.");
+                if ui.button("Create Cue").clicked() {
+                    self.stage = WorkflowStage::Cue;
+                }
+            }
+        }
+        ui.separator();
+        egui::ScrollArea::vertical().show(ui, |ui| {
+            for line in &self.run_log {
+                ui.label(line);
+            }
+        });
+    }
+
+    fn start_initial_run(&mut self) {
+        let clean = self
+            .workspace
+            .as_ref()
+            .ok_or_else(|| "no repository is open".to_owned())
+            .and_then(|workspace| workspace.is_clean().map_err(|error| error.to_string()));
+        if clean != Ok(true) {
+            self.error = Some(match clean {
+                Ok(false) => "commit or discard existing changes before starting a cue".to_owned(),
+                Err(error) => error,
+                Ok(true) => unreachable!(),
+            });
+            return;
+        }
+        let Some(session) = &mut self.session else {
+            return;
+        };
+        let prompt = session.cue().prompt();
+        match session.begin_run() {
+            Ok(run_id) => self.spawn_codex(run_id, prompt),
+            Err(error) => self.error = Some(error.to_string()),
+        }
+    }
+
+    fn start_follow_up(&mut self) {
+        let Some(session) = &mut self.session else {
+            return;
+        };
+        match session.follow_up(self.follow_up_text.clone()) {
+            Ok(run_id) => {
+                let prompt = codex::follow_up_prompt(session.cue(), session.messages());
+                self.follow_up_text.clear();
+                self.stage = WorkflowStage::Run;
+                self.spawn_codex(run_id, prompt);
+            }
+            Err(error) => self.error = Some(error.to_string()),
+        }
+    }
+
+    fn spawn_codex(&mut self, run_id: u64, prompt: String) {
+        let Some(repository) = self
+            .workspace
+            .as_ref()
+            .map(|workspace| workspace.root().to_path_buf())
+        else {
+            return;
+        };
+        match codex::start(&repository, prompt, self.codex_config.clone()) {
+            Ok(run) => {
+                self.active_run = Some(run);
+                self.active_run_id = Some(run_id);
+                self.run_log.clear();
+                self.error = None;
+            }
+            Err(error) => {
+                if let Some(session) = &mut self.session {
+                    let _ = session.execution_failed(run_id, error.to_string());
+                }
+                self.error = Some(error.to_string());
+            }
+        }
+    }
+
+    fn poll_codex(&mut self, context: &egui::Context) {
+        let Some(run) = &self.active_run else {
+            return;
+        };
+        let mut events = Vec::new();
+        while let Ok(event) = run.try_recv() {
+            events.push(event);
+        }
+        for event in events {
+            match event {
+                CodexEvent::Progress(message) => {
+                    self.run_log.push(message);
+                    if self.run_log.len() > 500 {
+                        self.run_log.remove(0);
+                    }
+                }
+                CodexEvent::Completed { summary } => {
+                    let run_id = self.active_run_id.take();
+                    self.active_run = None;
+                    self.refresh();
+                    if let (Some(session), Some(run_id)) = (&mut self.session, run_id)
+                        && let Err(error) =
+                            session.finish_run(run_id, summary, self.diff_text.clone())
+                    {
+                        self.error = Some(error.to_string());
+                    }
+                    self.stage = WorkflowStage::Review;
+                }
+                CodexEvent::Cancelled | CodexEvent::Failed(_) => {
+                    let message = match event {
+                        CodexEvent::Cancelled => "Codex run cancelled".to_owned(),
+                        CodexEvent::Failed(message) => message,
+                        _ => unreachable!(),
+                    };
+                    let run_id = self.active_run_id.take();
+                    self.active_run = None;
+                    if let (Some(session), Some(run_id)) = (&mut self.session, run_id) {
+                        let _ = session.execution_failed(run_id, message.clone());
+                    }
+                    self.error = Some(message);
+                }
+            }
+        }
+        if self.active_run.is_some() {
+            context.request_repaint_after(std::time::Duration::from_millis(50));
+        }
+    }
+
     fn shortcuts(&mut self, context: &egui::Context) {
         if context.input_mut(|input| input.consume_key(egui::Modifiers::COMMAND, egui::Key::O)) {
             self.choose_repository();
@@ -374,6 +559,10 @@ impl CodexDirigentApp {
 }
 
 impl eframe::App for CodexDirigentApp {
+    fn logic(&mut self, context: &egui::Context, _frame: &mut eframe::Frame) {
+        self.poll_codex(context);
+    }
+
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         self.shortcuts(ui.ctx());
         egui::Panel::top("toolbar").show_inside(ui, |ui| {

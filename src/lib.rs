@@ -1,6 +1,7 @@
 //! Application core for Codex Dirigent.
 
 pub mod app;
+pub mod codex;
 pub mod cue;
 pub mod review;
 pub mod theme;
