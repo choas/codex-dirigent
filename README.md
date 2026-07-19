@@ -2,9 +2,10 @@
 
 Codex Dirigent is a focused, native macOS application for directing Codex CLI
 changes through an explicit review gate. Open a local Git repository, browse
-its code read-only, and create as many repository-, file-, or line-range cues
-as needed. Each cue runs concurrently in its own Git worktree and moves through
-Run, Review, Done, and Archive lanes. A cue can be committed and merged into
+its code read-only, and add as many repository-, file-, or line-range cues to
+the Inbox as needed. Start one cue or the entire Inbox when ready. Each running
+cue gets its own Git worktree and moves through Inbox, Run, Review, Done, and
+Archive lanes. A cue can be committed and merged into
 `main` only after accepting its exact current diff.
 
 The interface and application core are written in Rust with `eframe`/`egui`.
@@ -46,10 +47,11 @@ cargo test
 2. Select a file in the left sidebar to inspect its line-numbered, read-only
    contents.
 3. Open **New Cue**, choose repository, file, or line-range scope, and add the
-   task. Codex Dirigent creates a dedicated branch and linked worktree from the
-   current `main` commit. Repeat without a fixed cue limit.
-4. In the **Cue Board** Run lane, start any cues you want. Their Codex processes
-   can run concurrently because they write to different worktrees.
+   task to the Inbox. Repeat without a fixed cue limit; queued cues do not create
+   branches or worktrees.
+4. In the **Cue Board**, choose **Run Cue** on one Inbox card or **Run Inbox** to
+   start all queued cues. Started cards move to Run, receive dedicated branches
+   and linked worktrees from the current `main` commit, and execute concurrently.
 5. In Review, open a cue, inspect its complete tracked and untracked diff, send
    follow-up instructions, or explicitly accept/reject it.
 6. After acceptance, enter a commit message and choose **Commit & Merge to

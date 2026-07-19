@@ -28,6 +28,7 @@ enum CueScope {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum CueLane {
+    Inbox,
     Run,
     Review,
     Done,
@@ -35,10 +36,17 @@ enum CueLane {
 }
 
 impl CueLane {
-    const ALL: [Self; 4] = [Self::Run, Self::Review, Self::Done, Self::Archive];
+    const ALL: [Self; 5] = [
+        Self::Inbox,
+        Self::Run,
+        Self::Review,
+        Self::Done,
+        Self::Archive,
+    ];
 
     const fn label(self) -> &'static str {
         match self {
+            Self::Inbox => "Inbox",
             Self::Run => "Run",
             Self::Review => "Review",
             Self::Done => "Done",
@@ -51,7 +59,7 @@ struct CueCard {
     id: u64,
     session: Session,
     lane: CueLane,
-    worktree: CueWorktree,
+    worktree: Option<CueWorktree>,
     active_run: Option<CodexRun>,
     active_run_id: Option<u64>,
     log: Vec<String>,
@@ -62,12 +70,12 @@ struct CueCard {
 }
 
 impl CueCard {
-    fn new(id: u64, cue: Cue, worktree: CueWorktree) -> Self {
+    fn new(id: u64, cue: Cue) -> Self {
         Self {
             id,
             session: Session::new(cue),
-            lane: CueLane::Run,
-            worktree,
+            lane: CueLane::Inbox,
+            worktree: None,
             active_run: None,
             active_run_id: None,
             log: Vec::new(),
@@ -336,8 +344,8 @@ impl CodexDirigentApp {
     }
 
     fn new_cue_ui(&mut self, ui: &mut egui::Ui) {
-        ui.heading("Create an isolated cue");
-        ui.label("Each cue gets its own Git worktree and can run concurrently with other cues.");
+        ui.heading("Add a cue to the Inbox");
+        ui.label("Queue as many cues as needed, then run them together or one at a time.");
         ui.add_space(8.0);
         ui.horizontal(|ui| {
             ui.selectable_value(&mut self.cue_scope, CueScope::Repository, "Repository");
@@ -365,7 +373,7 @@ impl CodexDirigentApp {
                 .hint_text("Describe the change you want Codex to make…")
                 .desired_rows(8),
         );
-        if ui.button("Add Cue to Run").clicked() {
+        if ui.button("Add Cue to Inbox").clicked() {
             self.create_cue();
         }
     }
@@ -391,20 +399,15 @@ impl CodexDirigentApp {
                 return;
             }
         };
-        let Some(workspace) = &self.workspace else {
+        if self.workspace.is_none() {
             return;
-        };
-        match workspace.create_cue_worktree(self.next_cue_id) {
-            Ok(worktree) => {
-                let id = self.next_cue_id;
-                self.next_cue_id += 1;
-                self.cues.push(CueCard::new(id, cue, worktree));
-                self.cue_text.clear();
-                self.error = None;
-                self.view = AppView::Board;
-            }
-            Err(error) => self.error = Some(error.to_string()),
         }
+        let id = self.next_cue_id;
+        self.next_cue_id += 1;
+        self.cues.push(CueCard::new(id, cue));
+        self.cue_text.clear();
+        self.error = None;
+        self.view = AppView::Board;
     }
 
     fn board_ui(&mut self, ui: &mut egui::Ui) {
@@ -413,9 +416,24 @@ impl CodexDirigentApp {
             if ui.button("+ New Cue").clicked() {
                 self.view = AppView::NewCue;
             }
+            let inbox_count = self
+                .cues
+                .iter()
+                .filter(|cue| cue.lane == CueLane::Inbox)
+                .count();
+            if ui
+                .add_enabled(
+                    inbox_count > 0,
+                    egui::Button::new(format!("Run Inbox ({inbox_count})"))
+                        .fill(theme::CODEX_ACCENT),
+                )
+                .clicked()
+            {
+                self.run_inbox();
+            }
         });
         ui.label(
-            "Runs are isolated in worktrees. Review, commit, and merge each cue independently.",
+            "Inbox cues create isolated worktrees only when started. Review and merge each result independently.",
         );
         ui.separator();
 
@@ -485,7 +503,11 @@ impl CodexDirigentApp {
                 cue.id,
                 cue.session.cue().instruction()
             ));
-            ui.label(format!("Branch: {}", cue.worktree.branch()));
+            if let Some(worktree) = &cue.worktree {
+                ui.label(format!("Branch: {}", worktree.branch()));
+            } else {
+                ui.label("Queued in Inbox; no worktree created yet.");
+            }
             if let Some(error) = &cue.error {
                 ui.colored_label(ui.visuals().error_fg_color, error);
             }
@@ -555,10 +577,38 @@ impl CodexDirigentApp {
         let Some(index) = self.cues.iter().position(|cue| cue.id == id) else {
             return;
         };
+        if self.cues[index].worktree.is_none() {
+            let Some(workspace) = &self.workspace else {
+                return;
+            };
+            match workspace.create_cue_worktree(id) {
+                Ok(worktree) => {
+                    self.cues[index].worktree = Some(worktree);
+                    self.cues[index].lane = CueLane::Run;
+                    self.cues[index].error = None;
+                }
+                Err(error) => {
+                    self.cues[index].error = Some(error.to_string());
+                    return;
+                }
+            }
+        }
         let prompt = self.cues[index].session.cue().prompt();
         match self.cues[index].session.begin_run() {
             Ok(run_id) => self.spawn_codex(index, run_id, prompt),
             Err(error) => self.cues[index].error = Some(error.to_string()),
+        }
+    }
+
+    fn run_inbox(&mut self) {
+        let queued: Vec<_> = self
+            .cues
+            .iter()
+            .filter(|cue| cue.lane == CueLane::Inbox)
+            .map(|cue| cue.id)
+            .collect();
+        for id in queued {
+            self.start_initial_run(id);
         }
     }
 
@@ -582,7 +632,18 @@ impl CodexDirigentApp {
     }
 
     fn spawn_codex(&mut self, index: usize, run_id: u64, prompt: String) {
-        let repository = self.cues[index].worktree.path().to_path_buf();
+        let Some(repository) = self.cues[index]
+            .worktree
+            .as_ref()
+            .map(|worktree| worktree.path().to_path_buf())
+        else {
+            let cue = &mut self.cues[index];
+            let message = "cue worktree was not created".to_owned();
+            let _ = cue.session.execution_failed(run_id, message.clone());
+            cue.lane = CueLane::Inbox;
+            cue.error = Some(message);
+            return;
+        };
         match codex::start(&repository, prompt, self.settings.codex_config()) {
             Ok(run) => {
                 let cue = &mut self.cues[index];
@@ -626,10 +687,18 @@ impl CodexDirigentApp {
                     let cue = &mut self.cues[index];
                     let run_id = cue.active_run_id.take();
                     cue.active_run = None;
-                    let diff = cue
-                        .worktree
-                        .open()
-                        .and_then(|workspace| workspace.working_diff());
+                    let diff = cue.worktree.as_ref().map_or_else(
+                        || {
+                            Err(crate::workspace::WorkspaceError::Git(
+                                "cue worktree was not created".to_owned(),
+                            ))
+                        },
+                        |worktree| {
+                            worktree
+                                .open()
+                                .and_then(|workspace| workspace.working_diff())
+                        },
+                    );
                     match (run_id, diff) {
                         (Some(run_id), Ok(diff)) => {
                             if let Err(error) = cue.session.finish_run(run_id, summary, diff) {
@@ -682,10 +751,18 @@ impl CodexDirigentApp {
         let Some(cue) = self.cues.iter_mut().find(|cue| cue.id == id) else {
             return;
         };
-        let diff = cue
-            .worktree
-            .open()
-            .and_then(|workspace| workspace.working_diff());
+        let diff = cue.worktree.as_ref().map_or_else(
+            || {
+                Err(crate::workspace::WorkspaceError::Git(
+                    "cue worktree was not created".to_owned(),
+                ))
+            },
+            |worktree| {
+                worktree
+                    .open()
+                    .and_then(|workspace| workspace.working_diff())
+            },
+        );
         match diff.and_then(|diff| {
             cue.session
                 .accept(&diff)
@@ -709,10 +786,18 @@ impl CodexDirigentApp {
                 return;
             };
             let message = self.cues[index].commit_message.clone();
-            let commit = self.cues[index]
-                .worktree
-                .open()
-                .and_then(|mut worktree| worktree.commit_approved(&approval, &message));
+            let commit = self.cues[index].worktree.as_ref().map_or_else(
+                || {
+                    Err(crate::workspace::WorkspaceError::Git(
+                        "cue worktree was not created".to_owned(),
+                    ))
+                },
+                |cue_worktree| {
+                    cue_worktree
+                        .open()
+                        .and_then(|mut worktree| worktree.commit_approved(&approval, &message))
+                },
+            );
             match commit {
                 Ok(commit) => self.cues[index].branch_commit = Some(commit),
                 Err(error) => {
@@ -724,7 +809,11 @@ impl CodexDirigentApp {
         let Some(main) = &mut self.workspace else {
             return;
         };
-        match main.merge_cue(&self.cues[index].worktree) {
+        let Some(worktree) = &self.cues[index].worktree else {
+            self.cues[index].error = Some("cue worktree was not created".to_owned());
+            return;
+        };
+        match main.merge_cue(worktree) {
             Ok(commit) => {
                 let cue = &mut self.cues[index];
                 if let Err(error) = cue.session.mark_committed(commit) {
@@ -743,10 +832,18 @@ impl CodexDirigentApp {
         let Some(index) = self.cues.iter().position(|cue| cue.id == id) else {
             return;
         };
+        let Some(worktree) = self.cues[index].worktree.as_ref() else {
+            self.cues[index].lane = CueLane::Archive;
+            self.cues[index].error = None;
+            if self.selected_cue == Some(id) {
+                self.selected_cue = None;
+            }
+            return;
+        };
         let Some(main) = &mut self.workspace else {
             return;
         };
-        match main.archive_cue_worktree(&self.cues[index].worktree) {
+        match main.archive_cue_worktree(worktree) {
             Ok(()) => {
                 self.cues[index].lane = CueLane::Archive;
                 self.cues[index].error = None;
@@ -765,7 +862,11 @@ impl CodexDirigentApp {
         let Some(main) = &mut self.workspace else {
             return;
         };
-        match main.archive_cue_worktree(&self.cues[index].worktree) {
+        let Some(worktree) = &self.cues[index].worktree else {
+            self.cues[index].error = Some("cue worktree was not created".to_owned());
+            return;
+        };
+        match main.archive_cue_worktree(worktree) {
             Ok(()) => {
                 let cue = &mut self.cues[index];
                 let _ = cue.session.reject();
@@ -872,11 +973,23 @@ fn render_card(ui: &mut egui::Ui, cue: &mut CueCard) -> Option<CardAction> {
             cue.id,
             truncate(cue.session.cue().instruction(), 42)
         ));
-        ui.small(cue.worktree.branch());
+        if let Some(worktree) = &cue.worktree {
+            ui.small(worktree.branch());
+        } else {
+            ui.small("Queued; worktree not created");
+        }
         if let Some(error) = &cue.error {
             ui.colored_label(ui.visuals().error_fg_color, truncate(error, 90));
         }
         match cue.lane {
+            CueLane::Inbox => {
+                if ui.button("Run Cue").clicked() {
+                    action = Some(CardAction::Run(cue.id));
+                }
+                if ui.button("Archive").clicked() {
+                    action = Some(CardAction::Archive(cue.id));
+                }
+            }
             CueLane::Run => match cue.session.state() {
                 SessionState::Ready => {
                     if ui.button("Run in Worktree").clicked() {
@@ -909,7 +1022,7 @@ fn render_card(ui: &mut egui::Ui, cue: &mut CueCard) -> Option<CardAction> {
                 }
             }
             CueLane::Archive => {
-                ui.label("Worktree removed");
+                ui.label("Archived");
             }
         }
     });
@@ -979,6 +1092,35 @@ fn with_line_numbers(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
+    use std::process::Command;
+
+    fn git(repository: &std::path::Path, arguments: &[&str]) {
+        let output = Command::new("git")
+            .args(arguments)
+            .current_dir(repository)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "git failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    fn repository() -> tempfile::TempDir {
+        let repository = tempfile::tempdir().unwrap();
+        git(repository.path(), &["init", "-b", "main"]);
+        git(repository.path(), &["config", "user.name", "Test User"]);
+        git(
+            repository.path(),
+            &["config", "user.email", "test@example.com"],
+        );
+        fs::write(repository.path().join("README.md"), "test\n").unwrap();
+        git(repository.path(), &["add", "README.md"]);
+        git(repository.path(), &["commit", "-m", "Initial commit"]);
+        repository
+    }
 
     #[test]
     fn starts_empty_in_browse_view() {
@@ -990,7 +1132,42 @@ mod tests {
     #[test]
     fn cue_lanes_match_requested_order() {
         let labels: Vec<_> = CueLane::ALL.into_iter().map(CueLane::label).collect();
-        assert_eq!(labels, ["Run", "Review", "Done", "Archive"]);
+        assert_eq!(labels, ["Inbox", "Run", "Review", "Done", "Archive"]);
+    }
+
+    #[test]
+    fn new_cues_wait_in_inbox_without_a_worktree() {
+        let cue = Cue::new("Update the docs", CueTarget::Repository).unwrap();
+        let card = CueCard::new(1, cue);
+        assert_eq!(card.lane, CueLane::Inbox);
+        assert!(card.worktree.is_none());
+        assert_eq!(card.session.state(), &SessionState::Ready);
+    }
+
+    #[test]
+    fn run_inbox_prepares_every_cue_and_moves_it_to_run() {
+        let repository = repository();
+        let mut app = CodexDirigentApp {
+            workspace: Some(Workspace::open(repository.path()).unwrap()),
+            ..CodexDirigentApp::default()
+        };
+        for id in 1..=3 {
+            let cue = Cue::new(format!("Cue {id}"), CueTarget::Repository).unwrap();
+            app.cues.push(CueCard::new(id, cue));
+        }
+        // Make process setup fail synchronously after worktree creation.
+        app.settings.codex_extra_arguments = "\"unterminated".to_owned();
+
+        app.run_inbox();
+
+        assert!(app.cues.iter().all(|cue| cue.lane == CueLane::Run));
+        assert!(app.cues.iter().all(|cue| cue.worktree.is_some()));
+        assert!(app.cues.iter().all(|cue| !cue.is_running()));
+
+        for id in 1..=3 {
+            app.archive_cue(id);
+        }
+        assert!(app.cues.iter().all(|cue| cue.lane == CueLane::Archive));
     }
 
     #[test]

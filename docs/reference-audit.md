@@ -28,8 +28,8 @@ below are original to Codex Dirigent.
 | --- | --- | --- | --- | --- |
 | Open a local repository | `workspace` | native folder dialog and recent path | last repository only | reject non-Git paths; open temp repo |
 | Browse files read-only | `workspace::tree`, `workspace::viewer` | file tree and code pane | none | ignore `.git`; path containment; text-size limit |
-| Create repository/file/range cue | `cue` | cue composer bound to selection | current session | prompt and range validation tests |
-| Execute with Codex | `codex` | concurrent Run cards and restrained progress pulse | Codex settings only | parallel fake CLI JSON streams, cancellation, arguments, env allowlist |
+| Create repository/file/range cue | `cue` | cue composer and unbounded Inbox | current session | prompt, range, and lazy-worktree tests |
+| Execute with Codex | `codex` | Run Cue/Run Inbox actions, concurrent Run cards, restrained progress pulse | Codex settings only | parallel fake CLI JSON streams, bulk queue transition, cancellation, arguments, env allowlist |
 | Refine with follow-up | `session` | conversation and follow-up composer | current session | state transition and prompt-context tests |
 | Review changes | `git::diff`, `review` | Review lane and unified diff pane | none | tracked and untracked diff fixtures; review gate tests |
 | Accept or reject | `review`, `git` | explicit actions | none | accept records reviewed snapshot; reject restores only run-owned paths |
@@ -39,9 +39,10 @@ below are original to Codex Dirigent.
 ## New architecture boundary
 
 The crate will have a small library for domain and subprocess behavior plus an
-`eframe`/`egui` macOS application binary. `App` owns one `Workspace`, one
-`Session`, `Settings`, and UI-only state. Background Codex execution reports
-typed events over a channel. Git operations use the `git` executable with
+`eframe`/`egui` macOS application binary. `App` owns one primary `Workspace`,
+an unbounded session-local board of cue `Session`s, `Settings`, and UI-only
+state. Inbox cues remain lightweight until started. Background Codex executions
+report typed events over channels. Git operations use the `git` executable with
 explicit arguments and `LC_ALL=C`; there is no generic backend trait because
 there is only one backend of each kind.
 
