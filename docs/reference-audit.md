@@ -29,9 +29,9 @@ below are original to Codex Dirigent.
 | Open a local repository | `workspace` | native folder dialog and recent path | last repository only | reject non-Git paths; open temp repo |
 | Browse files read-only | `workspace::tree`, `workspace::viewer` | file tree and code pane | none | ignore `.git`; path containment; text-size limit |
 | Create repository/file/range cue | `cue` | cue composer bound to selection | current session | prompt and range validation tests |
-| Execute with Codex | `codex` | Run/Cancel and restrained progress pulse | Codex settings only | fake CLI JSON stream, cancellation, arguments, env allowlist |
+| Execute with Codex | `codex` | concurrent Run cards and restrained progress pulse | Codex settings only | parallel fake CLI JSON streams, cancellation, arguments, env allowlist |
 | Refine with follow-up | `session` | conversation and follow-up composer | current session | state transition and prompt-context tests |
-| Review changes | `git::diff`, `review` | unified diff pane | none | tracked and untracked diff fixtures; review gate tests |
+| Review changes | `git::diff`, `review` | Review lane and unified diff pane | none | tracked and untracked diff fixtures; review gate tests |
 | Accept or reject | `review`, `git` | explicit actions | none | accept records reviewed snapshot; reject restores only run-owned paths |
 | Commit accepted work | `git::commit` | commit sheet and shortcut | none | commit impossible before acceptance or after tree changes |
 | Configure execution | `settings` | compact settings sheet | atomic JSON in app support | defaults, obsolete fields, corrupt file recovery, no secret values |
@@ -45,10 +45,11 @@ typed events over a channel. Git operations use the `git` executable with
 explicit arguments and `LC_ALL=C`; there is no generic backend trait because
 there is only one backend of each kind.
 
-The review safety invariant is: a commit is enabled only after the user accepts
-the exact current diff fingerprint. A changed working tree invalidates that
-acceptance. Reject is scoped to paths captured as part of the run and is
-confirmed in the UI; unrelated pre-existing changes are never silently reset.
+The review safety invariant is: every cue executes on its own linked Git
+worktree, and a commit is enabled only after the user accepts that worktree's
+exact current diff fingerprint. A changed cue worktree invalidates acceptance.
+Merges are preflighted before touching the clean `main` worktree. Reject removes
+only the isolated cue worktree and branch after confirmation.
 
 ## Deliberate exclusions
 

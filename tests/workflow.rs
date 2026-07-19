@@ -58,7 +58,7 @@ fn await_completion(run: &codex::CodexRun) -> String {
 #[test]
 fn complete_reviewed_codex_workflow() {
     let repository = tempfile::tempdir().unwrap();
-    git(repository.path(), &["init", "-q"]);
+    git(repository.path(), &["init", "-q", "-b", "main"]);
     git(
         repository.path(),
         &["config", "user.name", "Codex Dirigent"],
@@ -134,4 +134,98 @@ fn complete_reviewed_codex_workflow() {
             .unwrap()
             .contains("{ 3 }")
     );
+}
+
+#[test]
+fn concurrent_cues_run_in_worktrees_and_merge_cleanly() {
+    let repository = tempfile::tempdir().unwrap();
+    git(repository.path(), &["init", "-q", "-b", "main"]);
+    git(
+        repository.path(),
+        &["config", "user.name", "Codex Dirigent"],
+    );
+    git(
+        repository.path(),
+        &["config", "user.email", "test@example.invalid"],
+    );
+    fs::write(repository.path().join("a.txt"), "a1\n").unwrap();
+    fs::write(repository.path().join("b.txt"), "b1\n").unwrap();
+    git(repository.path(), &["add", "."]);
+    git(repository.path(), &["commit", "-qm", "initial"]);
+
+    let mut main = Workspace::open(repository.path()).unwrap();
+    let first_worktree = main.create_cue_worktree(101).unwrap();
+    let second_worktree = main.create_cue_worktree(102).unwrap();
+    let first_tools = tempfile::tempdir().unwrap();
+    let second_tools = tempfile::tempdir().unwrap();
+    let first_cli = first_tools.path().join("fake-codex");
+    let second_cli = second_tools.path().join("fake-codex");
+    for (path, body) in [
+        (
+            &first_cli,
+            "#!/bin/sh\ncat >/dev/null\nprintf 'a2\\n' > a.txt\nprintf '%s\\n' '{\"type\":\"agent_message\",\"text\":\"changed a\"}'\n",
+        ),
+        (
+            &second_cli,
+            "#!/bin/sh\ncat >/dev/null\nprintf 'b2\\n' > b.txt\nprintf '%s\\n' '{\"type\":\"agent_message\",\"text\":\"changed b\"}'\n",
+        ),
+    ] {
+        fs::write(path, body).unwrap();
+        let mut permissions = path.metadata().unwrap().permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(path, permissions).unwrap();
+    }
+
+    let mut first_session =
+        Session::new(Cue::new("change a", CueTarget::File(PathBuf::from("a.txt"))).unwrap());
+    let mut second_session =
+        Session::new(Cue::new("change b", CueTarget::File(PathBuf::from("b.txt"))).unwrap());
+    let first_id = first_session.begin_run().unwrap();
+    let second_id = second_session.begin_run().unwrap();
+    let first_run = codex::start(
+        first_worktree.path(),
+        first_session.cue().prompt(),
+        CodexConfig {
+            cli_path: first_cli,
+            ..CodexConfig::default()
+        },
+    )
+    .unwrap();
+    let second_run = codex::start(
+        second_worktree.path(),
+        second_session.cue().prompt(),
+        CodexConfig {
+            cli_path: second_cli,
+            ..CodexConfig::default()
+        },
+    )
+    .unwrap();
+
+    let first_summary = await_completion(&first_run);
+    let second_summary = await_completion(&second_run);
+    let mut first_workspace = first_worktree.open().unwrap();
+    let mut second_workspace = second_worktree.open().unwrap();
+    let first_diff = first_workspace.working_diff().unwrap();
+    let second_diff = second_workspace.working_diff().unwrap();
+    first_session
+        .finish_run(first_id, first_summary, &first_diff)
+        .unwrap();
+    second_session
+        .finish_run(second_id, second_summary, &second_diff)
+        .unwrap();
+    first_session.accept(&first_diff).unwrap();
+    second_session.accept(&second_diff).unwrap();
+    first_workspace
+        .commit_approved(first_session.approval().unwrap(), "Change a")
+        .unwrap();
+    second_workspace
+        .commit_approved(second_session.approval().unwrap(), "Change b")
+        .unwrap();
+
+    main.merge_cue(&first_worktree).unwrap();
+    main.merge_cue(&second_worktree).unwrap();
+    assert_eq!(main.read_text(Path::new("a.txt")).unwrap(), "a2\n");
+    assert_eq!(main.read_text(Path::new("b.txt")).unwrap(), "b2\n");
+    main.archive_cue_worktree(&first_worktree).unwrap();
+    main.archive_cue_worktree(&second_worktree).unwrap();
 }

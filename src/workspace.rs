@@ -222,6 +222,9 @@ impl Workspace {
     /// Returns an error when the primary worktree is dirty, has no commit, or
     /// Git cannot create the branch and linked worktree.
     pub fn create_cue_worktree(&self, cue_id: u64) -> Result<CueWorktree> {
+        if self.branch != "main" {
+            return Err(WorkspaceError::NotMainBranch);
+        }
         if !self.is_clean()? {
             return Err(WorkspaceError::Git(
                 "commit or stash primary-worktree changes before creating a cue worktree"

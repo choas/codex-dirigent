@@ -2,9 +2,10 @@
 
 Codex Dirigent is a focused, native macOS application for directing Codex CLI
 changes through an explicit review gate. Open a local Git repository, browse
-its code read-only, attach an instruction to the repository, a file, or a line
-range, run Codex, refine the result, review the diff, then accept or reject it.
-A commit is possible only after accepting the exact current diff.
+its code read-only, and create as many repository-, file-, or line-range cues
+as needed. Each cue runs concurrently in its own Git worktree and moves through
+Run, Review, Done, and Archive lanes. A cue can be committed and merged into
+`main` only after accepting its exact current diff.
 
 The interface and application core are written in Rust with `eframe`/`egui`.
 Codex CLI is the sole agent process and Git is the sole version-control
@@ -44,19 +45,23 @@ cargo test
    worktree.
 2. Select a file in the left sidebar to inspect its line-numbered, read-only
    contents.
-3. Open **Cue**, choose repository, file, or line-range scope, enter the task,
-   and create the cue.
-4. In **Run**, start Codex. The initial run requires a clean worktree so that
-   rejection has a precise, safe baseline. Progress is streamed into the app;
-   the run can be cancelled.
-5. In **Review**, inspect the complete tracked and untracked diff. Enter a
-   follow-up instruction to refine it, or explicitly accept/reject it.
-6. After acceptance, enter a commit message. Codex Dirigent rechecks that the
-   working diff still matches the accepted review before staging and committing.
+3. Open **New Cue**, choose repository, file, or line-range scope, and add the
+   task. Codex Dirigent creates a dedicated branch and linked worktree from the
+   current `main` commit. Repeat without a fixed cue limit.
+4. In the **Cue Board** Run lane, start any cues you want. Their Codex processes
+   can run concurrently because they write to different worktrees.
+5. In Review, open a cue, inspect its complete tracked and untracked diff, send
+   follow-up instructions, or explicitly accept/reject it.
+6. After acceptance, enter a commit message and choose **Commit & Merge to
+   Main**. The cue is committed in its worktree, checked with `git merge-tree`,
+   and merged into a clean `main`. A predicted conflict leaves `main` untouched;
+   an unexpected merge failure is aborted. Successfully merged cues move to
+   Done and can then be archived to remove their worktree and branch.
 
-Opening a different repository is disabled while Codex is running. A stale
-worker result cannot replace a newer run. Rejection has a confirmation dialog
-and restores only a run that began from the enforced clean baseline.
+Opening a different repository is disabled while Codex is running or active
+cues remain. A stale worker result cannot replace a newer run. Rejection has a
+confirmation dialog, removes only that cue's isolated worktree and branch, and
+never modifies `main`.
 
 Keyboard shortcuts follow macOS conventions: `⌘O` opens a repository, `⌘R`
 refreshes it, `⌘,` opens settings, and `Esc` closes settings or a rejection
@@ -96,8 +101,8 @@ and `target` content is not committed.
 
 ## Architecture and safety
 
-- `workspace`: contained local file browsing plus Git status, diff, restore,
-  and review-authorized commit operations
+- `workspace`: contained local file browsing plus Git status, diff, isolated
+  worktree creation, review-authorized commits, merge preflight, and safe merge
 - `cue`: validated repository, file, and 1-based line-range targets
 - `review`: run/follow-up/review state machine and exact-diff approval token
 - `codex`: direct CLI process lifecycle, JSON progress, hooks, and cancellation
@@ -112,12 +117,15 @@ The clean-start design audit and retained/excluded scope are recorded in
 - Initial release is macOS-only and has no signed/notarized binary release.
 - The file tree is intentionally flat and capped at 20,000 files; the viewer
   accepts UTF-8 text up to 2 MiB.
-- An initial cue cannot run on a dirty worktree. Commit or stash existing work
-  first; refinement runs operate on the current result under review.
+- The opened primary worktree must be clean and on a branch named `main` when
+  creating or merging cues.
+- Merge conflicts cannot be silently eliminated. They are detected before main
+  is changed and shown on the Review card so the cue branch remains recoverable.
+- Cue-board state is currently session-local. Linked worktrees and branches
+  remain recoverable in Git if the app exits before they are archived.
 - Visual smoke testing requires an interactive macOS session with screen
   recording permission; automated checks cover the domain and subprocess paths.
 
 ## License
 
 MIT. See [`LICENSE`](LICENSE).
-
