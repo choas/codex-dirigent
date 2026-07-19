@@ -65,6 +65,10 @@ cues remain. A stale worker result cannot replace a newer run. Rejection has a
 confirmation dialog, removes only that cue's isolated worktree and branch, and
 never modifies `main`.
 
+If an opened repository is moved or removed, starting a cue reports the missing
+repository path and asks you to reopen its current location instead of showing a
+generic filesystem error.
+
 Keyboard shortcuts follow macOS conventions: `⌘O` opens a repository, `⌘R`
 refreshes it, `⌘,` opens settings, and `Esc` closes settings or a rejection
 confirmation.

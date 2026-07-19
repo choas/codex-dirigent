@@ -16,6 +16,11 @@ const MAX_TEXT_BYTES: u64 = 2 * 1024 * 1024;
 pub enum WorkspaceError {
     #[error("the selected folder is not a Git worktree")]
     NotGitRepository,
+    #[error(
+        "repository is no longer available at `{path}`; reopen its current location",
+        path = .0.display()
+    )]
+    RepositoryUnavailable(PathBuf),
     #[error("path is outside the opened repository")]
     OutsideRepository,
     #[error("file is larger than the 2 MiB viewer limit")]
@@ -468,6 +473,9 @@ fn collect_files(root: &Path, directory: &Path, output: &mut Vec<PathBuf>) -> Re
 }
 
 fn git_output<const N: usize>(root: &Path, args: [&str; N]) -> Result<Output> {
+    if !root.is_dir() {
+        return Err(WorkspaceError::RepositoryUnavailable(root.to_path_buf()));
+    }
     Command::new("git")
         .args(args)
         .current_dir(root)
@@ -598,6 +606,21 @@ mod tests {
             workspace.read_text(Path::new("../outside")),
             Err(WorkspaceError::Io(_) | WorkspaceError::OutsideRepository)
         ));
+    }
+
+    #[test]
+    fn reports_when_an_open_repository_was_moved_or_removed() {
+        let temp = repository();
+        let workspace = Workspace::open(temp.path()).unwrap();
+        let former_path = workspace.root().to_path_buf();
+        temp.close().unwrap();
+
+        let error = workspace.create_cue_worktree(1).unwrap_err();
+        assert!(matches!(
+            error,
+            WorkspaceError::RepositoryUnavailable(ref path) if path == &former_path
+        ));
+        assert!(error.to_string().contains("reopen its current location"));
     }
 
     #[test]
