@@ -5,6 +5,7 @@ use std::ffi::OsString;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::review::ReviewApproval;
 
@@ -27,6 +28,10 @@ pub enum WorkspaceError {
     ReviewInvalidated,
     #[error("enter a commit message")]
     EmptyCommitMessage,
+    #[error("the primary worktree must be on the main branch before merging cues")]
+    NotMainBranch,
+    #[error("the cue cannot merge cleanly into main: {0}")]
+    MergeConflict(String),
     #[error("filesystem error: {0}")]
     Io(#[from] std::io::Error),
 }
@@ -44,6 +49,39 @@ pub struct Workspace {
     root: PathBuf,
     files: Vec<FileEntry>,
     branch: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CueWorktree {
+    path: PathBuf,
+    branch: String,
+    base_commit: String,
+}
+
+impl CueWorktree {
+    #[must_use]
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    #[must_use]
+    pub fn branch(&self) -> &str {
+        &self.branch
+    }
+
+    #[must_use]
+    pub fn base_commit(&self) -> &str {
+        &self.base_commit
+    }
+
+    /// Open this cue's isolated Git worktree.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the worktree no longer exists or Git cannot read it.
+    pub fn open(&self) -> Result<Workspace> {
+        Workspace::open(&self.path)
+    }
 }
 
 impl Workspace {
@@ -175,6 +213,124 @@ impl Workspace {
     /// Returns an error when Git status cannot be read.
     pub fn is_clean(&self) -> Result<bool> {
         Ok(self.statuses()?.is_empty())
+    }
+
+    /// Create an isolated branch and worktree for one cue at the current HEAD.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the primary worktree is dirty, has no commit, or
+    /// Git cannot create the branch and linked worktree.
+    pub fn create_cue_worktree(&self, cue_id: u64) -> Result<CueWorktree> {
+        if !self.is_clean()? {
+            return Err(WorkspaceError::Git(
+                "commit or stash primary-worktree changes before creating a cue worktree"
+                    .to_owned(),
+            ));
+        }
+        let base_commit = git_text(&self.root, ["rev-parse", "HEAD"])?
+            .trim()
+            .to_owned();
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_err(|error| WorkspaceError::Git(error.to_string()))?
+            .as_nanos();
+        let repository_key = blake3::hash(self.root.as_os_str().as_encoded_bytes()).to_hex();
+        let branch = format!("codex-dirigent/cue-{cue_id}-{}-{nonce}", std::process::id());
+        let path = std::env::temp_dir()
+            .join("codex-dirigent-worktrees")
+            .join(&repository_key[..12])
+            .join(format!("cue-{cue_id}-{nonce}"));
+        let parent = path.parent().ok_or(WorkspaceError::OutsideRepository)?;
+        fs::create_dir_all(parent)?;
+        let output = Command::new("git")
+            .args(["worktree", "add", "-b", &branch])
+            .arg(&path)
+            .arg(&base_commit)
+            .current_dir(&self.root)
+            .env("LC_ALL", "C")
+            .output()?;
+        if !output.status.success() {
+            return Err(git_error(&output));
+        }
+        Ok(CueWorktree {
+            path,
+            branch,
+            base_commit,
+        })
+    }
+
+    /// Preflight and merge a committed cue branch into the clean main branch.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error without changing main when the primary branch is not
+    /// `main`, either worktree is dirty, or Git predicts a conflict. If the
+    /// actual merge unexpectedly fails, it is aborted before returning.
+    pub fn merge_cue(&mut self, cue: &CueWorktree) -> Result<String> {
+        self.refresh()?;
+        if self.branch != "main" {
+            return Err(WorkspaceError::NotMainBranch);
+        }
+        if !self.is_clean()? {
+            return Err(WorkspaceError::Git(
+                "main worktree changed; commit or stash it before merging the cue".to_owned(),
+            ));
+        }
+        if !cue.open()?.is_clean()? {
+            return Err(WorkspaceError::Git(
+                "cue worktree still has uncommitted changes".to_owned(),
+            ));
+        }
+        let preflight = git_output(
+            &self.root,
+            ["merge-tree", "--write-tree", "HEAD", cue.branch()],
+        )?;
+        if !preflight.status.success() {
+            let detail = String::from_utf8_lossy(&preflight.stdout);
+            let stderr = String::from_utf8_lossy(&preflight.stderr);
+            return Err(WorkspaceError::MergeConflict(
+                format!("{detail}{stderr}").trim().to_owned(),
+            ));
+        }
+        let merge = Command::new("git")
+            .args(["merge", "--no-ff", "--no-edit", cue.branch()])
+            .current_dir(&self.root)
+            .env("LC_ALL", "C")
+            .output()?;
+        if !merge.status.success() {
+            let _abort = git_output(&self.root, ["merge", "--abort"]);
+            return Err(git_error(&merge));
+        }
+        let hash = git_text(&self.root, ["rev-parse", "HEAD"])?
+            .trim()
+            .to_owned();
+        self.refresh()?;
+        Ok(hash)
+    }
+
+    /// Remove a cue worktree and its merged branch.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when Git cannot remove the worktree or branch. Call
+    /// this only after the user explicitly archives a completed cue.
+    pub fn archive_cue_worktree(&mut self, cue: &CueWorktree) -> Result<()> {
+        let remove = Command::new("git")
+            .args(["worktree", "remove", "--force"])
+            .arg(cue.path())
+            .current_dir(&self.root)
+            .env("LC_ALL", "C")
+            .output()?;
+        if !remove.status.success() {
+            return Err(git_error(&remove));
+        }
+        let branch = git_output(&self.root, ["branch", "-D", cue.branch()])?;
+        if !branch.status.success() {
+            return Err(git_error(&branch));
+        }
+        self.refresh()?;
+        Ok(())
     }
 
     /// Commit the exact diff represented by an explicit review approval.
@@ -373,7 +529,7 @@ mod tests {
 
     fn repository() -> tempfile::TempDir {
         let temp = tempfile::tempdir().expect("tempdir");
-        run(temp.path(), &["init", "-q"]);
+        run(temp.path(), &["init", "-q", "-b", "main"]);
         run(temp.path(), &["config", "user.name", "Codex Dirigent"]);
         run(
             temp.path(),
@@ -497,5 +653,93 @@ mod tests {
                 .unwrap()
                 .contains("value")
         );
+    }
+
+    fn approve_and_commit(worktree: &mut Workspace, message: &str) {
+        use crate::cue::{Cue, CueTarget};
+        use crate::review::Session;
+
+        let diff = worktree.working_diff().unwrap();
+        let mut session = Session::new(Cue::new(message, CueTarget::Repository).unwrap());
+        let run = session.begin_run().unwrap();
+        session.finish_run(run, "done", &diff).unwrap();
+        session.accept(&diff).unwrap();
+        worktree
+            .commit_approved(session.approval().unwrap(), message)
+            .unwrap();
+    }
+
+    #[test]
+    fn independent_cue_worktrees_merge_into_main() {
+        let temp = repository();
+        fs::write(temp.path().join("other.txt"), "one\n").unwrap();
+        run(temp.path(), &["add", "."]);
+        run(temp.path(), &["commit", "-qm", "add other"]);
+        let mut main = Workspace::open(temp.path()).unwrap();
+        let first = main.create_cue_worktree(1).unwrap();
+        let second = main.create_cue_worktree(2).unwrap();
+
+        let mut first_workspace = first.open().unwrap();
+        fs::write(
+            first.path().join("src/lib.rs"),
+            "pub fn value() -> u8 { 2 }\n",
+        )
+        .unwrap();
+        first_workspace.refresh().unwrap();
+        approve_and_commit(&mut first_workspace, "Change value");
+
+        let mut second_workspace = second.open().unwrap();
+        fs::write(second.path().join("other.txt"), "two\n").unwrap();
+        second_workspace.refresh().unwrap();
+        approve_and_commit(&mut second_workspace, "Change other");
+
+        main.merge_cue(&first).unwrap();
+        main.merge_cue(&second).unwrap();
+        assert!(
+            main.read_text(Path::new("src/lib.rs"))
+                .unwrap()
+                .contains("{ 2 }")
+        );
+        assert_eq!(main.read_text(Path::new("other.txt")).unwrap(), "two\n");
+        main.archive_cue_worktree(&first).unwrap();
+        main.archive_cue_worktree(&second).unwrap();
+        assert!(!first.path().exists());
+        assert!(!second.path().exists());
+    }
+
+    #[test]
+    fn conflicting_cue_is_rejected_before_main_changes() {
+        let temp = repository();
+        let mut main = Workspace::open(temp.path()).unwrap();
+        let first = main.create_cue_worktree(10).unwrap();
+        let second = main.create_cue_worktree(11).unwrap();
+        let mut first_workspace = first.open().unwrap();
+        fs::write(first.path().join("src/lib.rs"), "first\n").unwrap();
+        first_workspace.refresh().unwrap();
+        approve_and_commit(&mut first_workspace, "First change");
+        let mut second_workspace = second.open().unwrap();
+        fs::write(second.path().join("src/lib.rs"), "second\n").unwrap();
+        second_workspace.refresh().unwrap();
+        approve_and_commit(&mut second_workspace, "Second change");
+
+        main.merge_cue(&first).unwrap();
+        let head_before = git_text(temp.path(), ["rev-parse", "HEAD"]).unwrap();
+        assert!(matches!(
+            main.merge_cue(&second),
+            Err(WorkspaceError::MergeConflict(_))
+        ));
+        assert_eq!(
+            git_text(temp.path(), ["rev-parse", "HEAD"]).unwrap(),
+            head_before
+        );
+        assert!(main.is_clean().unwrap());
+        main.archive_cue_worktree(&first).unwrap();
+        let remove = Command::new("git")
+            .args(["worktree", "remove", "--force"])
+            .arg(second.path())
+            .current_dir(temp.path())
+            .output()
+            .unwrap();
+        assert!(remove.status.success());
     }
 }
