@@ -1,6 +1,6 @@
 # Verification record
 
-Final verification date: 2026-07-18 on Apple Silicon macOS.
+Final verification date: 2026-07-19 on Apple Silicon macOS.
 
 ## Automated checks
 
@@ -9,8 +9,8 @@ Final verification date: 2026-07-18 on Apple Silicon macOS.
 | `cargo fmt --check` | passed |
 | `cargo check --all-targets` | passed |
 | `cargo clippy --all-targets -- -D warnings` | passed without warnings |
-| `cargo test` | passed: 24 unit tests and 1 integration test |
-| `cargo test --test workflow -- --nocapture` | passed full fake-Codex workflow |
+| `cargo test` | passed: 27 unit tests and 2 integration tests |
+| `cargo test --test workflow -- --nocapture` | passed full and concurrent fake-Codex workflows |
 | `cargo build --release --locked` from a fresh `git archive HEAD` | passed; arm64 Mach-O produced |
 | `sh -n scripts/bundle-macos.sh` | passed |
 | `plutil -lint packaging/Info.plist` | passed |
@@ -18,13 +18,16 @@ Final verification date: 2026-07-18 on Apple Silicon macOS.
 | `codesign --verify --deep --strict` on generated app | passed ad-hoc signature verification |
 | direct launch of debug and packaged executables | stayed running until smoke-test termination |
 
-The integration test creates a disposable Git repository, browses its committed
-file, creates a file cue, executes a fake JSON-streaming Codex CLI, collects the
-diff, sends a contextual follow-up through a second execution, accepts the exact
-reviewed diff, commits through the approval gate, and verifies the clean result.
-Focused tests separately cover cancellation, rejection, stale runs, unsafe cue
-paths, dirty-tree status, untracked diffs, obsolete settings, and corrupt
-settings fallback.
+The first integration test creates a disposable Git repository, browses its
+committed file, creates a file cue, executes a fake JSON-streaming Codex CLI,
+collects the diff, sends a contextual follow-up through a second execution,
+accepts the exact reviewed diff, commits through the approval gate, and verifies
+the clean result. The second starts two fake Codex runs concurrently in separate
+linked worktrees, reviews and commits both results, safely merges both branches
+into `main`, and verifies their combined result. Focused tests separately cover
+cancellation, rejection, stale runs, unsafe cue paths, dirty-tree status,
+untracked diffs, merge preflight and conflict isolation, obsolete settings, and
+corrupt settings fallback.
 
 ## Removed-integration search
 
@@ -57,4 +60,5 @@ so pixel-level visual inspection remains a manual release check in an interactiv
 signed-in session. The bundle is ad-hoc signed for local use, not Developer ID
 signed or notarized. Intel compilation was not exercised on this Apple Silicon
 host; CI targets a current macOS runner and the code contains no architecture-
-specific logic.
+specific logic. Cue-board grouping is session-local; linked worktrees and cue
+branches remain available for recovery if the application exits before archive.
