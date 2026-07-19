@@ -1,6 +1,8 @@
 use eframe::egui;
+use std::collections::BTreeMap;
+use std::ffi::OsString;
 use std::fmt::Write as _;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use crate::{
     PRODUCT_NAME,
@@ -9,8 +11,74 @@ use crate::{
     review::{Session, SessionState},
     settings::{self, Settings},
     theme,
-    workspace::{CueWorktree, Workspace},
+    workspace::{CueWorktree, FileEntry, Workspace},
 };
+
+#[derive(Debug, Default)]
+struct FileTree {
+    directories: BTreeMap<OsString, Self>,
+    files: Vec<FileEntry>,
+}
+
+impl FileTree {
+    fn from_files(files: &[FileEntry]) -> Self {
+        let mut tree = Self::default();
+        for file in files {
+            tree.insert(file.clone());
+        }
+        tree
+    }
+
+    fn insert(&mut self, file: FileEntry) {
+        let mut directory = self;
+        if let Some(parent) = file.relative_path.parent() {
+            for component in parent.components() {
+                directory = directory
+                    .directories
+                    .entry(component.as_os_str().to_os_string())
+                    .or_default();
+            }
+        }
+        directory.files.push(file);
+    }
+
+    fn show(
+        &self,
+        ui: &mut egui::Ui,
+        directory_path: &Path,
+        selected_file: Option<&PathBuf>,
+        clicked_file: &mut Option<PathBuf>,
+    ) {
+        for (name, contents) in &self.directories {
+            let path = directory_path.join(name);
+            egui::CollapsingHeader::new(name.to_string_lossy())
+                .id_salt(&path)
+                .show(ui, |ui| {
+                    contents.show(ui, &path, selected_file, clicked_file);
+                });
+        }
+
+        for file in &self.files {
+            let marker = file
+                .status
+                .map_or("  ".to_owned(), |status| format!("{status} "));
+            let name = file
+                .relative_path
+                .file_name()
+                .unwrap_or(file.relative_path.as_os_str())
+                .to_string_lossy();
+            let label = format!("{marker}{name}");
+            let selected = selected_file == Some(&file.relative_path);
+            if ui
+                .selectable_label(selected, label)
+                .on_hover_text(file.relative_path.display().to_string())
+                .clicked()
+            {
+                *clicked_file = Some(file.relative_path.clone());
+            }
+        }
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum AppView {
@@ -292,30 +360,30 @@ impl CodexDirigentApp {
     }
 
     fn workspace_ui(&mut self, ui: &mut egui::Ui) {
-        let files = self
+        let file_tree = self
             .workspace
             .as_ref()
-            .map(|workspace| workspace.files().to_vec())
+            .map(|workspace| FileTree::from_files(workspace.files()))
             .unwrap_or_default();
+        let mut clicked_file = None;
         egui::Panel::left("file_tree")
             .resizable(true)
-            .default_size(240.0)
+            .default_size(260.0)
             .show_inside(ui, |ui| {
                 ui.heading("Files");
                 ui.separator();
                 egui::ScrollArea::vertical().show(ui, |ui| {
-                    for file in files {
-                        let marker = file
-                            .status
-                            .map_or("  ".to_owned(), |status| format!("{status} "));
-                        let label = format!("{marker}{}", file.relative_path.display());
-                        let selected = self.selected_file.as_ref() == Some(&file.relative_path);
-                        if ui.selectable_label(selected, label).clicked() {
-                            self.select_file(file.relative_path);
-                        }
-                    }
+                    file_tree.show(
+                        ui,
+                        Path::new(""),
+                        self.selected_file.as_ref(),
+                        &mut clicked_file,
+                    );
                 });
             });
+        if let Some(path) = clicked_file {
+            self.select_file(path);
+        }
 
         egui::CentralPanel::default().show_inside(ui, |ui| match self.view {
             AppView::Browse => self.browser_ui(ui),
@@ -1142,6 +1210,33 @@ mod tests {
         assert_eq!(card.lane, CueLane::Inbox);
         assert!(card.worktree.is_none());
         assert_eq!(card.session.state(), &SessionState::Ready);
+    }
+
+    #[test]
+    fn file_tree_groups_files_by_directory() {
+        let files = vec![
+            FileEntry {
+                relative_path: PathBuf::from("README.md"),
+                status: None,
+            },
+            FileEntry {
+                relative_path: PathBuf::from("src/app.rs"),
+                status: Some('M'),
+            },
+            FileEntry {
+                relative_path: PathBuf::from("src/nested/mod.rs"),
+                status: None,
+            },
+        ];
+
+        let tree = FileTree::from_files(&files);
+        assert_eq!(tree.files[0].relative_path, Path::new("README.md"));
+        let src = &tree.directories[std::ffi::OsStr::new("src")];
+        assert_eq!(src.files[0].status, Some('M'));
+        assert_eq!(
+            src.directories[std::ffi::OsStr::new("nested")].files[0].relative_path,
+            Path::new("src/nested/mod.rs")
+        );
     }
 
     #[test]

@@ -117,8 +117,8 @@ The clean-start design audit and retained/excluded scope are recorded in
 ## Current limitations
 
 - Initial release is macOS-only and has no signed/notarized binary release.
-- The file tree is intentionally flat and capped at 20,000 files; the viewer
-  accepts UTF-8 text up to 2 MiB.
+- The expandable file tree is capped at 20,000 files; the viewer accepts UTF-8
+  text up to 2 MiB.
 - The opened primary worktree must be clean and on a branch named `main` when
   creating or merging cues.
 - Merge conflicts cannot be silently eliminated. They are detected before main
