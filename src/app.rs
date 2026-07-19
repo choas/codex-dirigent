@@ -366,7 +366,7 @@ impl CodexDirigentApp {
     }
 
     fn toolbar(&mut self, ui: &mut egui::Ui) {
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             ui.heading(PRODUCT_NAME);
             ui.add_space(16.0);
             ui.selectable_value(&mut self.view, AppView::Browse, "Browse");
@@ -565,26 +565,40 @@ impl CodexDirigentApp {
         ui.separator();
 
         let mut action = None;
-        egui::ScrollArea::horizontal()
-            .id_salt("cue_lanes")
+        egui::ScrollArea::vertical()
+            .id_salt("cue_board")
             .show(ui, |ui| {
-                ui.horizontal_top(|ui| {
-                    for lane in CueLane::ALL {
-                        let count = self.cues.iter().filter(|cue| cue.lane == lane).count();
-                        ui.group(|ui| {
-                            ui.set_min_width(245.0);
-                            ui.set_max_width(280.0);
-                            ui.heading(format!("{}  {count}", lane.label()));
-                            ui.separator();
-                            for cue in self.cues.iter_mut().filter(|cue| cue.lane == lane) {
-                                if let Some(next) = render_card(ui, cue) {
-                                    action = Some(next);
-                                }
-                                ui.add_space(6.0);
+                for lane in CueLane::ALL {
+                    let count = self.cues.iter().filter(|cue| cue.lane == lane).count();
+                    egui::CollapsingHeader::new(format!("{}  {count}", lane.label()))
+                        .id_salt(("cue_lane", lane.label()))
+                        .default_open(count > 0)
+                        .show(ui, |ui| {
+                            if count == 0 {
+                                ui.weak("No cues");
+                                return;
                             }
+
+                            let spacing = ui.spacing().item_spacing.x;
+                            let card_width = cue_card_width(ui.available_width(), spacing);
+                            ui.horizontal_wrapped(|ui| {
+                                for cue in cues_in_lane_newest_first(&mut self.cues, lane) {
+                                    ui.allocate_ui_with_layout(
+                                        egui::vec2(card_width, 0.0),
+                                        egui::Layout::top_down(egui::Align::Min),
+                                        |ui| {
+                                            if let Some(next) = render_card(ui, cue) {
+                                                action = Some(next);
+                                            }
+                                        },
+                                    );
+                                }
+                            });
                         });
+                    if lane != CueLane::Archive {
+                        ui.separator();
                     }
-                });
+                }
             });
         if let Some(action) = action {
             self.handle_card_action(action);
@@ -651,24 +665,27 @@ impl CodexDirigentApp {
             }
             if cue.lane == CueLane::Review {
                 ui.label("Reviewed worktree diff");
-                egui::ScrollArea::both().max_height(320.0).show(ui, |ui| {
-                    let mut diff = cue.session.review_diff().to_owned();
-                    ui.add(
-                        egui::TextEdit::multiline(&mut diff)
-                            .font(egui::TextStyle::Monospace)
-                            .interactive(false)
-                            .desired_width(f32::INFINITY),
-                    );
-                });
+                egui::ScrollArea::vertical()
+                    .max_height(320.0)
+                    .show(ui, |ui| {
+                        let mut diff = cue.session.review_diff().to_owned();
+                        let available_width = ui.available_width();
+                        ui.add(
+                            egui::TextEdit::multiline(&mut diff)
+                                .font(egui::TextStyle::Monospace)
+                                .interactive(false)
+                                .desired_width(available_width),
+                        );
+                    });
                 let reviewing = matches!(cue.session.state(), SessionState::Reviewing { .. });
                 let accepted = cue.session.state() == &SessionState::Accepted;
                 if reviewing {
-                    ui.horizontal(|ui| {
-                        ui.text_edit_singleline(&mut cue.follow_up);
+                    ui.horizontal_wrapped(|ui| {
+                        ui.add(egui::TextEdit::singleline(&mut cue.follow_up).desired_width(180.0));
                         send_follow_up = ui.button("Send Follow-up").clicked();
                     });
                 }
-                ui.horizontal(|ui| {
+                ui.horizontal_wrapped(|ui| {
                     accept = ui
                         .add_enabled(reviewing, egui::Button::new("Accept Diff"))
                         .clicked();
@@ -676,9 +693,11 @@ impl CodexDirigentApp {
                         .add_enabled(reviewing || accepted, egui::Button::new("Reject Cue"))
                         .clicked();
                 });
-                ui.horizontal(|ui| {
+                ui.horizontal_wrapped(|ui| {
                     ui.label("Commit message");
-                    ui.text_edit_singleline(&mut cue.commit_message);
+                    ui.add(
+                        egui::TextEdit::singleline(&mut cue.commit_message).desired_width(180.0),
+                    );
                     commit_merge = ui
                         .add_enabled(
                             accepted,
@@ -1108,7 +1127,7 @@ impl CodexDirigentApp {
 fn render_card(ui: &mut egui::Ui, cue: &mut CueCard) -> Option<CardAction> {
     let mut action = None;
     ui.group(|ui| {
-        ui.set_min_width(220.0);
+        ui.set_width(ui.available_width());
         ui.strong(format!(
             "#{}  {}",
             cue.id,
@@ -1124,12 +1143,14 @@ fn render_card(ui: &mut egui::Ui, cue: &mut CueCard) -> Option<CardAction> {
         }
         match cue.lane {
             CueLane::Inbox => {
-                if ui.button("Run Cue").clicked() {
-                    action = Some(CardAction::Run(cue.id));
-                }
-                if ui.button("Archive").clicked() {
-                    action = Some(CardAction::Archive(cue.id));
-                }
+                ui.horizontal_wrapped(|ui| {
+                    if ui.button("Run Cue").clicked() {
+                        action = Some(CardAction::Run(cue.id));
+                    }
+                    if ui.button("Archive").clicked() {
+                        action = Some(CardAction::Archive(cue.id));
+                    }
+                });
             }
             CueLane::Run => match cue.session.state() {
                 SessionState::Ready => {
@@ -1168,6 +1189,23 @@ fn render_card(ui: &mut egui::Ui, cue: &mut CueCard) -> Option<CardAction> {
         }
     });
     action
+}
+
+fn cues_in_lane_newest_first(
+    cues: &mut [CueCard],
+    lane: CueLane,
+) -> impl Iterator<Item = &mut CueCard> {
+    cues.iter_mut().rev().filter(move |cue| cue.lane == lane)
+}
+
+fn cue_card_width(available_width: f32, spacing: f32) -> f32 {
+    const MIN_CARD_WIDTH: f32 = 190.0;
+    const IDEAL_CARD_WIDTH: f32 = 240.0;
+
+    let columns = ((available_width + spacing) / (MIN_CARD_WIDTH + spacing))
+        .floor()
+        .max(1.0);
+    ((available_width - spacing * (columns - 1.0)) / columns).clamp(0.0, IDEAL_CARD_WIDTH)
 }
 
 fn truncate(text: &str, limit: usize) -> String {
@@ -1282,6 +1320,31 @@ mod tests {
         app.handle_card_action(CardAction::Select(42));
         assert_eq!(app.selected_cue, Some(42));
         assert_eq!(app.view, AppView::CueDetail);
+    }
+
+    #[test]
+    fn cues_in_each_lane_are_listed_newest_first() {
+        let mut cues = vec![
+            CueCard::new(1, Cue::new("Old inbox cue", CueTarget::Repository).unwrap()),
+            CueCard::new(2, Cue::new("Review cue", CueTarget::Repository).unwrap()),
+            CueCard::new(
+                3,
+                Cue::new("Latest inbox cue", CueTarget::Repository).unwrap(),
+            ),
+        ];
+        cues[1].lane = CueLane::Review;
+
+        let inbox_ids: Vec<_> = cues_in_lane_newest_first(&mut cues, CueLane::Inbox)
+            .map(|cue| cue.id)
+            .collect();
+        assert_eq!(inbox_ids, [3, 1]);
+    }
+
+    #[test]
+    fn cue_cards_fit_the_available_board_width() {
+        assert!((cue_card_width(160.0, 8.0) - 160.0).abs() < f32::EPSILON);
+        assert!(cue_card_width(420.0, 8.0) <= 206.0);
+        assert!(cue_card_width(900.0, 8.0) <= 240.0);
     }
 
     #[test]

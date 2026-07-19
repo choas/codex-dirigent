@@ -52,6 +52,8 @@ cargo test
 4. In the **Cue Board**, choose **Run Cue** on one Inbox card or **Run Inbox** to
    start all queued cues. Started cards move to Run, receive dedicated branches
    and linked worktrees from the current `main` commit, and execute concurrently.
+   Board lanes can be folded, and their cue cards wrap to the available width
+   with the newest cue first.
 5. In Review, choose **Open Review** to enter its dedicated detail screen,
    inspect the complete tracked and untracked diff, send follow-up instructions,
    or explicitly accept/reject it.
