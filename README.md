@@ -66,6 +66,12 @@ cues remain. A stale worker result cannot replace a newer run. Rejection has a
 confirmation dialog, removes only that cue's isolated worktree and branch, and
 never modifies `main`.
 
+After a restart, linked cue worktrees are rediscovered and opened directly in
+Review so their diffs can still be accepted, rejected, committed, or merged.
+The original instruction is currently unavailable after recovery, so recovered
+cards identify their branch and require careful diff review. Inbox-only cues
+still remain session-local because they have no Git worktree to recover.
+
 If an opened repository is moved or removed, starting a cue reports the missing
 repository path and asks you to reopen its current location instead of showing a
 generic filesystem error.
@@ -128,8 +134,9 @@ The clean-start design audit and retained/excluded scope are recorded in
   creating or merging cues.
 - Merge conflicts cannot be silently eliminated. They are detected before main
   is changed and shown on the Review card so the cue branch remains recoverable.
-- Cue-board state is currently session-local. Linked worktrees and branches
-  remain recoverable in Git if the app exits before they are archived.
+- Inbox-only cue state is currently session-local. Started cues are recovered
+  from their linked Git worktrees after restart, but their original instructions
+  and conversation history are not yet persisted.
 - Visual smoke testing requires an interactive macOS session with screen
   recording permission; automated checks cover the domain and subprocess paths.
 

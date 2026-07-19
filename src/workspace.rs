@@ -268,6 +268,19 @@ impl Workspace {
         })
     }
 
+    /// Find linked worktrees previously created for unfinished cues.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when Git cannot enumerate linked worktrees.
+    pub fn linked_cue_worktrees(&self) -> Result<Vec<CueWorktree>> {
+        let output = git_output(&self.root, ["worktree", "list", "--porcelain", "-z"])?;
+        if !output.status.success() {
+            return Err(git_error(&output));
+        }
+        Ok(parse_linked_cue_worktrees(&output.stdout))
+    }
+
     /// Preflight and merge a committed cue branch into the clean main branch.
     ///
     /// # Errors
@@ -520,6 +533,54 @@ fn parse_porcelain(bytes: &[u8]) -> HashMap<PathBuf, char> {
     statuses
 }
 
+fn parse_linked_cue_worktrees(bytes: &[u8]) -> Vec<CueWorktree> {
+    let mut worktrees = Vec::new();
+    let mut fields = Vec::new();
+    for field in bytes.split(|byte| *byte == 0) {
+        if field.is_empty() {
+            if !fields.is_empty() {
+                if let Some(worktree) = cue_worktree_from_fields(&fields) {
+                    worktrees.push(worktree);
+                }
+                fields.clear();
+            }
+        } else {
+            fields.push(field);
+        }
+    }
+    if !fields.is_empty()
+        && let Some(worktree) = cue_worktree_from_fields(&fields)
+    {
+        worktrees.push(worktree);
+    }
+    worktrees
+}
+
+fn cue_worktree_from_fields(fields: &[&[u8]]) -> Option<CueWorktree> {
+    let path = fields
+        .iter()
+        .find_map(|field| field.strip_prefix(b"worktree "))?;
+    let head = fields
+        .iter()
+        .find_map(|field| field.strip_prefix(b"HEAD "))?;
+    let branch = fields
+        .iter()
+        .find_map(|field| field.strip_prefix(b"branch refs/heads/"))?;
+    let branch = String::from_utf8_lossy(branch).into_owned();
+    if !branch.starts_with("codex-dirigent/cue-") {
+        return None;
+    }
+    let path = PathBuf::from(OsString::from(String::from_utf8_lossy(path).as_ref()));
+    if !path.is_dir() {
+        return None;
+    }
+    Some(CueWorktree {
+        path,
+        branch,
+        base_commit: String::from_utf8_lossy(head).into_owned(),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -731,6 +792,23 @@ mod tests {
         main.archive_cue_worktree(&second).unwrap();
         assert!(!first.path().exists());
         assert!(!second.path().exists());
+    }
+
+    #[test]
+    fn lists_linked_cue_worktrees_for_recovery() {
+        let temp = repository();
+        let mut main = Workspace::open(temp.path()).unwrap();
+        let cue = main.create_cue_worktree(42).unwrap();
+
+        let linked = main.linked_cue_worktrees().unwrap();
+        assert_eq!(linked.len(), 1);
+        assert_eq!(linked[0].branch(), cue.branch());
+        assert_eq!(
+            linked[0].path().canonicalize().unwrap(),
+            cue.path().canonicalize().unwrap()
+        );
+
+        main.archive_cue_worktree(&cue).unwrap();
     }
 
     #[test]

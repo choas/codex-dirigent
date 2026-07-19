@@ -276,6 +276,7 @@ impl CodexDirigentApp {
                 self.error = None;
                 self.view = AppView::Browse;
                 self.save_settings();
+                self.recover_linked_cues();
             }
             Err(error) => self.error = Some(error.to_string()),
         }
@@ -291,6 +292,62 @@ impl CodexDirigentApp {
         }
         if let Some(path) = self.selected_file.clone() {
             self.select_file(path);
+        }
+    }
+
+    fn recover_linked_cues(&mut self) {
+        let linked = match self.workspace.as_ref().map(Workspace::linked_cue_worktrees) {
+            Some(Ok(linked)) => linked,
+            Some(Err(error)) => {
+                self.error = Some(format!("could not recover unfinished cues: {error}"));
+                return;
+            }
+            None => return,
+        };
+        let mut recovered = Vec::new();
+        for worktree in linked {
+            let diff = match worktree
+                .open()
+                .and_then(|workspace| workspace.working_diff())
+            {
+                Ok(diff) => diff,
+                Err(error) => {
+                    self.error = Some(format!(
+                        "could not recover cue branch `{}`: {error}",
+                        worktree.branch()
+                    ));
+                    continue;
+                }
+            };
+            let instruction = format!("Recovered unfinished cue from `{}`", worktree.branch());
+            let Ok(cue) = Cue::new(instruction, CueTarget::Repository) else {
+                continue;
+            };
+            let id = self.next_cue_id;
+            self.next_cue_id += 1;
+            let mut card = CueCard::new(id, cue);
+            let Ok(run_id) = card.session.begin_run() else {
+                continue;
+            };
+            if card
+                .session
+                .finish_run(run_id, "Recovered after application restart", diff)
+                .is_err()
+            {
+                continue;
+            }
+            card.lane = CueLane::Review;
+            card.worktree = Some(worktree);
+            recovered.push(id);
+            self.cues.push(card);
+        }
+        if let Some(id) = recovered.last().copied() {
+            self.selected_cue = Some(id);
+            self.view = AppView::CueDetail;
+            self.error = Some(format!(
+                "Recovered {} unfinished cue worktree(s). Original instructions were not persisted; review each diff carefully.",
+                recovered.len()
+            ));
         }
     }
 
@@ -1287,6 +1344,31 @@ mod tests {
             app.archive_cue(id);
         }
         assert!(app.cues.iter().all(|cue| cue.lane == CueLane::Archive));
+    }
+
+    #[test]
+    fn opening_repository_recovers_unfinished_cue_worktrees_for_review() {
+        let repository = repository();
+        let main = Workspace::open(repository.path()).unwrap();
+        let worktree = main.create_cue_worktree(77).unwrap();
+        fs::write(worktree.path().join("README.md"), "recovered change\n").unwrap();
+
+        let mut app = CodexDirigentApp::default();
+        app.open_repository(repository.path());
+
+        assert_eq!(app.cues.len(), 1);
+        assert_eq!(app.cues[0].lane, CueLane::Review);
+        assert!(
+            app.cues[0]
+                .session
+                .review_diff()
+                .contains("recovered change")
+        );
+        assert_eq!(app.selected_cue, Some(app.cues[0].id));
+        assert_eq!(app.view, AppView::CueDetail);
+
+        app.reject_cue(app.cues[0].id);
+        assert_eq!(app.cues[0].lane, CueLane::Archive);
     }
 
     #[test]

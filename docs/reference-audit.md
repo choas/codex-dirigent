@@ -50,7 +50,9 @@ The review safety invariant is: every cue executes on its own linked Git
 worktree, and a commit is enabled only after the user accepts that worktree's
 exact current diff fingerprint. A changed cue worktree invalidates acceptance.
 Merges are preflighted before touching the clean `main` worktree. Reject removes
-only the isolated cue worktree and branch after confirmation.
+only the isolated cue worktree and branch after confirmation. On restart,
+unfinished linked cue worktrees are rediscovered as reviewable recovery cards;
+Inbox-only instructions remain session-local.
 
 ## Deliberate exclusions
 
