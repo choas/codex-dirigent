@@ -84,6 +84,7 @@ impl FileTree {
 enum AppView {
     Browse,
     Board,
+    CueDetail,
     NewCue,
 }
 
@@ -388,6 +389,7 @@ impl CodexDirigentApp {
         egui::CentralPanel::default().show_inside(ui, |ui| match self.view {
             AppView::Browse => self.browser_ui(ui),
             AppView::Board => self.board_ui(ui),
+            AppView::CueDetail => self.cue_detail_ui(ui),
             AppView::NewCue => self.new_cue_ui(ui),
         });
     }
@@ -530,16 +532,14 @@ impl CodexDirigentApp {
         if let Some(action) = action {
             self.handle_card_action(action);
         }
-
-        if self.selected_cue.is_some() {
-            ui.separator();
-            self.selected_cue_ui(ui);
-        }
     }
 
     fn handle_card_action(&mut self, action: CardAction) {
         match action {
-            CardAction::Select(id) => self.selected_cue = Some(id),
+            CardAction::Select(id) => {
+                self.selected_cue = Some(id);
+                self.view = AppView::CueDetail;
+            }
             CardAction::Run(id) => self.start_initial_run(id),
             CardAction::Cancel(id) => {
                 if let Some(cue) = self.cues.iter().find(|cue| cue.id == id)
@@ -552,12 +552,25 @@ impl CodexDirigentApp {
         }
     }
 
+    fn cue_detail_ui(&mut self, ui: &mut egui::Ui) {
+        if ui.button("← Cue Board").clicked() {
+            self.view = AppView::Board;
+            return;
+        }
+        ui.separator();
+        egui::ScrollArea::vertical()
+            .id_salt("cue_detail")
+            .show(ui, |ui| self.selected_cue_ui(ui));
+    }
+
     fn selected_cue_ui(&mut self, ui: &mut egui::Ui) {
         let Some(id) = self.selected_cue else {
+            self.view = AppView::Board;
             return;
         };
         let Some(index) = self.cues.iter().position(|cue| cue.id == id) else {
             self.selected_cue = None;
+            self.view = AppView::Board;
             return;
         };
         let mut send_follow_up = false;
@@ -905,6 +918,7 @@ impl CodexDirigentApp {
             self.cues[index].error = None;
             if self.selected_cue == Some(id) {
                 self.selected_cue = None;
+                self.view = AppView::Board;
             }
             return;
         };
@@ -917,6 +931,7 @@ impl CodexDirigentApp {
                 self.cues[index].error = None;
                 if self.selected_cue == Some(id) {
                     self.selected_cue = None;
+                    self.view = AppView::Board;
                 }
             }
             Err(error) => self.cues[index].error = Some(error.to_string()),
@@ -941,6 +956,7 @@ impl CodexDirigentApp {
                 cue.lane = CueLane::Archive;
                 cue.error = None;
                 self.selected_cue = None;
+                self.view = AppView::Board;
             }
             Err(error) => self.cues[index].error = Some(error.to_string()),
         }
@@ -1201,6 +1217,14 @@ mod tests {
     fn cue_lanes_match_requested_order() {
         let labels: Vec<_> = CueLane::ALL.into_iter().map(CueLane::label).collect();
         assert_eq!(labels, ["Inbox", "Run", "Review", "Done", "Archive"]);
+    }
+
+    #[test]
+    fn opening_review_navigates_to_a_dedicated_detail_view() {
+        let mut app = CodexDirigentApp::default();
+        app.handle_card_action(CardAction::Select(42));
+        assert_eq!(app.selected_cue, Some(42));
+        assert_eq!(app.view, AppView::CueDetail);
     }
 
     #[test]
