@@ -1,6 +1,6 @@
 # Verification record
 
-Final verification date: 2026-07-19 on Apple Silicon macOS.
+Final verification date: 2026-07-20 on Apple Silicon macOS.
 
 ## Automated checks
 
@@ -9,7 +9,7 @@ Final verification date: 2026-07-19 on Apple Silicon macOS.
 | `cargo fmt --check` | passed |
 | `cargo check --all-targets` | passed |
 | `cargo clippy --all-targets -- -D warnings` | passed without warnings |
-| `cargo test` | passed: 34 unit tests and 2 integration tests |
+| `cargo test` | passed: 36 unit tests and 2 integration tests |
 | `cargo test --test workflow -- --nocapture` | passed full and concurrent fake-Codex workflows |
 | `cargo build --release --locked` from a fresh `git archive HEAD` | passed; arm64 Mach-O produced |
 | `sh -n scripts/bundle-macos.sh` | passed |
@@ -26,10 +26,11 @@ the clean result. The second starts two fake Codex runs concurrently in separate
 linked worktrees, reviews and commits both results, safely merges both branches
 into `main`, and verifies their combined result. Focused tests separately cover
 cancellation, rejection, stale runs, unsafe cue paths, dirty-tree status,
-untracked diffs, expandable file-tree grouping, dedicated review navigation,
-linked-worktree restart recovery, lazy Inbox worktree creation, bulk
-Inbox-to-Run transitions, merge preflight and conflict isolation, obsolete
-settings, missing/moved repository diagnostics, and corrupt settings fallback.
+untracked diffs, expandable file-tree grouping, responsive foldable cue lanes,
+newest-first card ordering, dedicated review navigation, linked-worktree restart
+recovery, lazy Inbox worktree creation, bulk Inbox-to-Run transitions, merge
+preflight and conflict isolation, obsolete settings, missing/moved repository
+diagnostics, and corrupt settings fallback.
 
 ## Removed-integration search
 
