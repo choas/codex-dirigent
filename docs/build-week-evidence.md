@@ -2,6 +2,10 @@
 
 Evidence date: 2026-07-20 (Europe/Berlin). Target track: **Developer Tools**.
 
+- Public source repository: <https://github.com/choas/codex-dirigent>
+- Default branch: `main`
+- License: MIT
+
 ## Codex and GPT-5.6 contribution
 
 Codex CLI `0.144.5` was invoked explicitly with the ChatGPT-supported GPT-5.6
@@ -58,10 +62,8 @@ as release assets only after notarization and staple validation succeed.
 
 ## Submission artifacts still requiring owner accounts
 
-- Create or authorize a GitHub repository and push `main`.
 - Configure a `notarytool` keychain profile, rerun the release script with
   `NOTARY_PROFILE`, and publish the notarized ZIP plus checksum.
 - Record and upload the public, audible, sub-three-minute YouTube demonstration.
 - Add the repository URL, release URL, video URL, and this Codex session ID to
   the Devpost submission and test every link while signed out.
-
