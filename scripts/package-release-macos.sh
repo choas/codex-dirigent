@@ -26,7 +26,8 @@ fi
 
 rm -f "$archive" "$checksum"
 ditto -c -k --sequesterRsrc --keepParent "$app_dir" "$archive"
-shasum -a 256 "$archive" >"$checksum"
+(CDPATH= cd -- "$project_root/dist" && \
+  shasum -a 256 "$(basename "$archive")" >"$(basename "$checksum")")
 
 echo "Created $archive"
 echo "Created $checksum"

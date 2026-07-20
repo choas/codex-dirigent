@@ -20,7 +20,9 @@ Final verification date: 2026-07-20 on Apple Silicon macOS.
 | `lipo -archs` on release executable | passed: `x86_64 arm64` |
 | `codesign --verify --deep --strict` on release app | passed Developer ID signature verification |
 | `shasum -a 256 -c` and `unzip -t` on release ZIP | passed |
-| `spctl --assess --type execute` | expected rejection: notarization remains pending |
+| `xcrun notarytool submit --wait` | accepted; ticket stapled and validated |
+| `spctl --assess --type execute` | passed: `Notarized Developer ID` |
+| unauthenticated repository, release, and ranged asset requests | passed: HTTP 200/200/206 |
 | direct launch of debug and packaged executables | stayed running until smoke-test termination |
 
 The first integration test creates a disposable Git repository, browses its
@@ -69,8 +71,9 @@ because the verification process did not have macOS screen-recording permission,
 so pixel-level visual inspection remains a manual release check in an interactive
 signed-in session. The local release artifact was built as a universal `arm64`
 and `x86_64` application and passed strict verification with a timestamped
-Developer ID signature. It is not notarized because no `notarytool` keychain
-profile is configured; Gatekeeper therefore reports `Unnotarized Developer ID`.
-Codex-generated summaries and progress are intentionally not persisted; after
-restart, conversation recovery contains the original user-authored instruction
-and follow-ups, and the review diff is regenerated from the linked worktree.
+Developer ID signature. Apple accepted notarization submission
+`daa5b5df-9dad-4e9e-b774-28fb0a81191c`; the ticket was stapled and validated,
+and Gatekeeper accepted the app as `Notarized Developer ID`. Codex-generated
+summaries and progress are intentionally not persisted; after restart,
+conversation recovery contains the original user-authored instruction and
+follow-ups, and the review diff is regenerated from the linked worktree.

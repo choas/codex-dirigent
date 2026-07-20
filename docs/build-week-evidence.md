@@ -48,22 +48,23 @@ includes concurrent cues running in isolated worktrees and merging cleanly into
 The release workflow produced a universal `arm64` + `x86_64` macOS application
 with hardened runtime and a timestamped Developer ID signature.
 
+- Release: <https://github.com/choas/codex-dirigent/releases/tag/v0.1.0>
 - Artifact: `Codex-Dirigent-0.1.0-macos-universal.zip`
-- SHA-256: `bef92de67c19d90c0fb0ec17a323402c2740e6d06c7cfe9dbdc7dcc4b2719f00`
+- SHA-256: `b7886568c40b4db0fd9002fd43ebd76fc759ea7fd9cde78b828eeaab733ef4d7`
 - Signing authority: `Developer ID Application: Lars Gregori (U49ZNKS7D7)`
 - Bundle identifier: `com.openai.codex-dirigent`
+- Apple notarization submission: `daa5b5df-9dad-4e9e-b774-28fb0a81191c`
+- Apple notarization result: accepted, stapled, and validated
 - Signature verification: passed `codesign --verify --deep --strict`
+- Gatekeeper verification: accepted as `Notarized Developer ID`
 - Archive integrity: passed checksum verification and `unzip -t`
-- Apple notarization: pending; no `notarytool` keychain profile is configured on
-  the build machine
 
-Generated build artifacts remain ignored by Git. Publish the ZIP and checksum
-as release assets only after notarization and staple validation succeed.
+Generated build artifacts remain ignored by Git. The notarized ZIP and portable
+checksum are published as public GitHub release assets.
 
 ## Submission artifacts still requiring owner accounts
 
-- Configure a `notarytool` keychain profile, rerun the release script with
-  `NOTARY_PROFILE`, and publish the notarized ZIP plus checksum.
 - Record and upload the public, audible, sub-three-minute YouTube demonstration.
 - Add the repository URL, release URL, video URL, and this Codex session ID to
-  the Devpost submission and test every link while signed out.
+  the Devpost submission. Repository, release, and binary access have been
+  tested without GitHub credentials; test the final video while signed out too.

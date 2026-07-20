@@ -25,6 +25,22 @@ Codex Dirigent launches `codex exec --json` with the repository as its working
 root and the `workspace-write` sandbox. Authentication stays with Codex CLI;
 the app does not store account credentials or API keys.
 
+## Install the notarized macOS release
+
+Download the universal ZIP and checksum from the
+[v0.1.0 release](https://github.com/choas/codex-dirigent/releases/tag/v0.1.0),
+then verify and open it:
+
+```sh
+shasum -a 256 -c Codex-Dirigent-0.1.0-macos-universal.zip.sha256
+ditto -x -k Codex-Dirigent-0.1.0-macos-universal.zip .
+open "Codex Dirigent.app"
+```
+
+The release supports Apple Silicon and Intel, is signed with Developer ID, and
+is notarized by Apple. On first launch, macOS may ask for normal confirmation to
+open an application downloaded from the internet.
+
 ## Build and run
 
 ```sh
@@ -151,7 +167,7 @@ The clean-start design audit and retained/excluded scope are recorded in
 
 ## Current limitations
 
-- Initial release is macOS-only and has no published notarized binary release.
+- Initial release is macOS-only.
 - The expandable file tree is capped at 20,000 files; the viewer accepts UTF-8
   text up to 2 MiB.
 - The opened primary worktree must be clean and on a branch named `main` when
