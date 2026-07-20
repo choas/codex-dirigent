@@ -121,9 +121,19 @@ open "dist/Codex Dirigent.app"
 
 The script makes a release build, generates the icon from the original SVG,
 assembles `dist/Codex Dirigent.app`, and applies an ad-hoc local signature.
-For distribution, replace that signature with a Developer ID signature and
-notarize the bundle using your Apple developer credentials. Generated `dist`
-and `target` content is not committed.
+For a universal Intel/Apple Silicon release, first install both Rust targets,
+then provide a Developer ID identity:
+
+```sh
+rustup target add aarch64-apple-darwin x86_64-apple-darwin
+CODE_SIGN_IDENTITY="Developer ID Application: Your Name (TEAMID)" \
+  ./scripts/package-release-macos.sh
+```
+
+Set `NOTARY_PROFILE` to a `notarytool` keychain profile to submit, wait for,
+and staple Apple notarization before the final ZIP and SHA-256 file are created.
+Without it, the release is Developer ID signed but explicitly reported as not
+notarized. Generated `dist` and `target` content is not committed.
 
 ## Architecture and safety
 
