@@ -26,11 +26,11 @@ below are original to Codex Dirigent.
 
 | Workflow | Core module | Rust UI | Persistence | Focused verification |
 | --- | --- | --- | --- | --- |
-| Open a local repository | `workspace` | native folder dialog and recent path | last repository only | reject non-Git paths; open temp repo |
+| Open a local repository | `workspace` | native folder dialog and recent path | last repository plus board repository identity | reject non-Git paths; open temp repo |
 | Browse files read-only | `workspace::tree`, `workspace::viewer` | file tree and code pane | none | ignore `.git`; path containment; text-size limit |
-| Create repository/file/range cue | `cue` | cue composer and unbounded Inbox | current session | prompt, range, and lazy-worktree tests |
+| Create repository/file/range cue | `cue` | cue composer and unbounded Inbox | versioned atomic cue board | prompt, range, round-trip, and Inbox restart tests |
 | Execute with Codex | `codex` | Run Cue/Run Inbox actions, concurrent Run cards, restrained progress pulse | Codex settings only | parallel fake CLI JSON streams, bulk queue transition, cancellation, arguments, env allowlist |
-| Refine with follow-up | `session` | conversation and follow-up composer | current session | state transition and prompt-context tests |
+| Refine with follow-up | `session` | conversation and follow-up composer | user-authored instructions and follow-ups | state transition, prompt-context, and restart recovery tests |
 | Review changes | `git::diff`, `review` | Review lane and unified diff pane | none | tracked and untracked diff fixtures; review gate tests |
 | Accept or reject | `review`, `git` | explicit actions | none | accept records reviewed snapshot; reject restores only run-owned paths |
 | Commit accepted work | `git::commit` | commit sheet and shortcut | none | commit impossible before acceptance or after tree changes |
@@ -40,19 +40,22 @@ below are original to Codex Dirigent.
 
 The crate will have a small library for domain and subprocess behavior plus an
 `eframe`/`egui` macOS application binary. `App` owns one primary `Workspace`,
-an unbounded session-local board of cue `Session`s, `Settings`, and UI-only
-state. Inbox cues remain lightweight until started. Background Codex executions
-report typed events over channels. Git operations use the `git` executable with
-explicit arguments and `LC_ALL=C`; there is no generic backend trait because
-there is only one backend of each kind.
+an unbounded board of cue `Session`s, `Settings`, and UI-only state. A narrow
+versioned JSON schema atomically persists user-authored cue and conversation
+state beside settings. Inbox cues remain lightweight until started. Background
+Codex executions report typed events over channels. Git operations use the
+`git` executable with explicit arguments and `LC_ALL=C`; there is no generic
+backend trait because there is only one backend of each kind.
 
 The review safety invariant is: every cue executes on its own linked Git
 worktree, and a commit is enabled only after the user accepts that worktree's
 exact current diff fingerprint. A changed cue worktree invalidates acceptance.
 Merges are preflighted before touching the clean `main` worktree. Reject removes
 only the isolated cue worktree and branch after confirmation. On restart,
-unfinished linked cue worktrees are rediscovered as reviewable recovery cards;
-Inbox-only instructions remain session-local.
+persisted active cues are joined to Git's actual linked worktrees by branch;
+unmatched state is discarded, while unmatched live worktrees retain the
+conservative recovery-card behavior. Diffs, generated output, process state,
+secrets, and exact-diff approval tokens are not persisted.
 
 ## Deliberate exclusions
 
@@ -63,8 +66,8 @@ Inbox-only instructions remain session-local.
   sidecars, telemetry, and autonomous agent pools.
 - Fast-model analysis, smart-interaction tuning, custom themes, animation
   selection, novelty animations, sounds, and game-like views.
-- SQLite: the focused session does not need a database. Small settings use
-  atomic JSON and cues live in the current application session.
+- SQLite: the focused workflow does not need a database. Settings and the
+  versioned cue board use separate small atomic JSON files.
 - Reference assets and packaging metadata. New identity assets and metadata
   will be authored from scratch.
 

@@ -94,9 +94,52 @@ impl Session {
         &self.messages
     }
 
+    pub(crate) fn user_follow_ups(&self) -> impl Iterator<Item = &str> {
+        self.messages.iter().skip(1).filter_map(|message| {
+            (message.speaker == Speaker::User).then_some(message.text.as_str())
+        })
+    }
+
     #[must_use]
     pub fn review_diff(&self) -> &str {
         &self.review_diff
+    }
+
+    pub(crate) fn recover_ready(cue: Cue, follow_ups: Vec<String>) -> Self {
+        Self::recover_with_state(cue, follow_ups, SessionState::Ready, String::new())
+    }
+
+    pub(crate) fn recover_reviewing(
+        cue: Cue,
+        follow_ups: Vec<String>,
+        review_diff: String,
+    ) -> Self {
+        let next_run_id = recovered_next_run_id(follow_ups.len());
+        Self::recover_with_state(
+            cue,
+            follow_ups,
+            SessionState::Reviewing {
+                run_id: next_run_id - 1,
+            },
+            review_diff,
+        )
+    }
+
+    pub(crate) fn recover_committed_branch(
+        cue: Cue,
+        follow_ups: Vec<String>,
+        review_diff: String,
+    ) -> Self {
+        Self::recover_with_state(cue, follow_ups, SessionState::Accepted, review_diff)
+    }
+
+    pub(crate) fn recover_done(cue: Cue, follow_ups: Vec<String>, commit: String) -> Self {
+        Self::recover_with_state(
+            cue,
+            follow_ups,
+            SessionState::Committed { commit },
+            String::new(),
+        )
     }
 
     /// Begin the initial Codex run.
@@ -250,6 +293,19 @@ impl Session {
         Ok(())
     }
 
+    pub(crate) fn mark_recovered_branch_merged(
+        &mut self,
+        commit: impl Into<String>,
+    ) -> Result<(), ReviewError> {
+        if self.state != SessionState::Accepted || self.approval.is_some() {
+            return Err(ReviewError::InvalidTransition);
+        }
+        self.state = SessionState::Committed {
+            commit: commit.into(),
+        };
+        Ok(())
+    }
+
     fn start_run(&mut self) -> u64 {
         let run_id = self.next_run_id;
         self.next_run_id += 1;
@@ -257,6 +313,38 @@ impl Session {
         self.state = SessionState::Running { run_id };
         run_id
     }
+
+    fn recover_with_state(
+        cue: Cue,
+        follow_ups: Vec<String>,
+        state: SessionState,
+        review_diff: String,
+    ) -> Self {
+        let mut messages = Vec::with_capacity(follow_ups.len() + 1);
+        messages.push(Message {
+            speaker: Speaker::User,
+            text: cue.instruction().to_owned(),
+        });
+        messages.extend(follow_ups.into_iter().map(|text| Message {
+            speaker: Speaker::User,
+            text,
+        }));
+        let next_run_id = recovered_next_run_id(messages.len().saturating_sub(1));
+        Self {
+            cue,
+            state,
+            messages,
+            review_diff,
+            approval: None,
+            next_run_id,
+        }
+    }
+}
+
+fn recovered_next_run_id(follow_up_count: usize) -> u64 {
+    u64::try_from(follow_up_count)
+        .unwrap_or(u64::MAX - 1)
+        .saturating_add(2)
 }
 
 fn fingerprint(diff: &str) -> blake3::Hash {

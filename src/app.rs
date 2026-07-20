@@ -1,11 +1,12 @@
 use eframe::egui;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
 use crate::{
     PRODUCT_NAME,
+    board::{self, BoardState, PersistedCue, PersistedLane},
     codex::{self, CodexEvent, CodexRun},
     cue::{Cue, CueTarget},
     review::{Session, SessionState},
@@ -185,6 +186,8 @@ pub struct CodexDirigentApp {
     confirm_reject: Option<u64>,
     settings: Settings,
     settings_path: Option<PathBuf>,
+    board_path: Option<PathBuf>,
+    loaded_board: Option<BoardState>,
     settings_open: bool,
 }
 
@@ -206,6 +209,8 @@ impl Default for CodexDirigentApp {
             confirm_reject: None,
             settings: Settings::default(),
             settings_path: None,
+            board_path: None,
+            loaded_board: None,
             settings_open: false,
         }
     }
@@ -215,7 +220,7 @@ impl CodexDirigentApp {
     #[must_use]
     pub fn load() -> Self {
         let path = settings::default_path().ok();
-        let (loaded_settings, warning) = path.as_ref().map_or_else(
+        let (loaded_settings, settings_warning) = path.as_ref().map_or_else(
             || {
                 (
                     Settings::default(),
@@ -230,11 +235,19 @@ impl CodexDirigentApp {
                 ),
             },
         );
+        let board_path = path
+            .as_ref()
+            .map(|settings_path| settings_path.with_file_name(board::FILE_NAME));
+        let (loaded_board, board_warning) = board_path.as_ref().map_or_else(
+            || (BoardState::default(), None),
+            |board_path| board::load_or_empty(board_path),
+        );
         let recent = loaded_settings.last_repository.clone();
         let mut app = Self {
             settings: loaded_settings,
             settings_path: path,
-            error: warning,
+            board_path,
+            loaded_board: Some(loaded_board),
             ..Self::default()
         };
         if let Some(repository) = recent
@@ -242,7 +255,19 @@ impl CodexDirigentApp {
         {
             app.open_repository(&repository);
         }
+        for warning in [settings_warning, board_warning].into_iter().flatten() {
+            app.append_warning(warning);
+        }
         app
+    }
+
+    fn append_warning(&mut self, warning: impl Into<String>) {
+        let warning = warning.into();
+        self.error = Some(
+            self.error
+                .take()
+                .map_or(warning.clone(), |existing| format!("{existing}\n{warning}")),
+        );
     }
 
     fn any_running(&self) -> bool {
@@ -267,6 +292,7 @@ impl CodexDirigentApp {
     fn open_repository(&mut self, path: &std::path::Path) {
         match Workspace::open(path) {
             Ok(workspace) => {
+                let persisted_board = self.loaded_board.take().unwrap_or_default();
                 self.settings.last_repository = Some(workspace.root().to_path_buf());
                 self.workspace = Some(workspace);
                 self.selected_file = None;
@@ -276,7 +302,8 @@ impl CodexDirigentApp {
                 self.error = None;
                 self.view = AppView::Browse;
                 self.save_settings();
-                self.recover_linked_cues();
+                self.recover_linked_cues(&persisted_board);
+                self.save_board();
             }
             Err(error) => self.error = Some(error.to_string()),
         }
@@ -295,7 +322,7 @@ impl CodexDirigentApp {
         }
     }
 
-    fn recover_linked_cues(&mut self) {
+    fn recover_linked_cues(&mut self, persisted_board: &BoardState) {
         let linked = match self.workspace.as_ref().map(Workspace::linked_cue_worktrees) {
             Some(Ok(linked)) => linked,
             Some(Err(error)) => {
@@ -304,15 +331,174 @@ impl CodexDirigentApp {
             }
             None => return,
         };
+        let repository = self
+            .workspace
+            .as_ref()
+            .map(|workspace| workspace.root().to_path_buf());
+        let metadata_matches = persisted_board.repository == repository;
+        let mut linked_by_branch: BTreeMap<_, _> = linked
+            .into_iter()
+            .map(|worktree| (worktree.branch().to_owned(), worktree))
+            .collect();
+        let (mut recovered_review_ids, stale_count) = if metadata_matches {
+            self.recover_persisted_cues(persisted_board, &mut linked_by_branch)
+        } else if !persisted_board.cues.is_empty() {
+            self.append_warning(
+                "saved cue-board state belongs to a different repository and was ignored",
+            );
+            (Vec::new(), 0)
+        } else {
+            (Vec::new(), 0)
+        };
+        let fallback_ids = self.recover_worktrees_without_metadata(linked_by_branch);
+        let fallback_count = fallback_ids.len();
+        recovered_review_ids.extend(fallback_ids);
+        if let Some(id) = recovered_review_ids.last().copied() {
+            self.selected_cue = Some(id);
+            self.view = AppView::CueDetail;
+        } else if !self.cues.is_empty() {
+            self.view = AppView::Board;
+        }
+        if fallback_count > 0 {
+            self.append_warning(format!(
+                "Recovered {fallback_count} unfinished cue worktree(s) without persisted metadata. Review each diff carefully."
+            ));
+        }
+        if stale_count > 0 {
+            self.append_warning(format!(
+                "Ignored {stale_count} stale persisted cue entr{} with no matching linked worktree.",
+                if stale_count == 1 { "y" } else { "ies" }
+            ));
+        }
+    }
+
+    fn recover_persisted_cues(
+        &mut self,
+        persisted_board: &BoardState,
+        linked_by_branch: &mut BTreeMap<String, CueWorktree>,
+    ) -> (Vec<u64>, usize) {
+        self.next_cue_id = self.next_cue_id.max(persisted_board.next_cue_id);
+        let mut used_ids = BTreeSet::new();
+        let mut review_ids = Vec::new();
+        let mut stale_count = 0_usize;
+        for persisted in &persisted_board.cues {
+            self.next_cue_id = self.next_cue_id.max(persisted.id.saturating_add(1));
+            let Ok(cue) = persisted.cue() else {
+                stale_count += 1;
+                continue;
+            };
+            if !used_ids.insert(persisted.id) {
+                stale_count += 1;
+                continue;
+            }
+            let Some(branch) = persisted.worktree_branch.as_deref() else {
+                if persisted.lane == PersistedLane::Inbox {
+                    let mut card = CueCard::new(persisted.id, cue.clone());
+                    card.session = Session::recover_ready(cue, persisted.follow_ups.clone());
+                    card.commit_message.clone_from(&persisted.commit_message);
+                    self.cues.push(card);
+                } else {
+                    stale_count += 1;
+                }
+                continue;
+            };
+            let Some(worktree) = linked_by_branch.remove(branch) else {
+                stale_count += 1;
+                continue;
+            };
+            if let Some(card) = self.recover_persisted_worktree(persisted, cue, worktree) {
+                if card.lane == CueLane::Review {
+                    review_ids.push(card.id);
+                }
+                self.cues.push(card);
+            }
+        }
+        (review_ids, stale_count)
+    }
+
+    fn recover_persisted_worktree(
+        &mut self,
+        persisted: &PersistedCue,
+        cue: Cue,
+        worktree: CueWorktree,
+    ) -> Option<CueCard> {
+        let diff = match worktree
+            .open()
+            .and_then(|workspace| workspace.working_diff())
+        {
+            Ok(diff) => diff,
+            Err(error) => {
+                self.append_warning(format!(
+                    "could not recover cue branch `{}`: {error}",
+                    worktree.branch()
+                ));
+                return None;
+            }
+        };
+        let branch_commit = persisted
+            .branch_commit
+            .as_ref()
+            .filter(|commit| branch_commit_is_live(&worktree, commit))
+            .cloned();
+        if persisted.branch_commit.is_some() && branch_commit.is_none() {
+            self.append_warning(format!(
+                "discarded stale committed-branch metadata for `{}`; review is required again",
+                worktree.branch()
+            ));
+        }
+        let merged_commit = (persisted.lane == PersistedLane::Done && branch_commit.is_some())
+            .then_some(persisted.merged_commit.as_ref())
+            .flatten()
+            .filter(|commit| {
+                self.workspace
+                    .as_ref()
+                    .is_some_and(|main| main.contains_commit(commit).unwrap_or(false))
+            })
+            .cloned();
+        if persisted.lane == PersistedLane::Done && merged_commit.is_none() {
+            self.append_warning(format!(
+                "discarded stale merged-cue metadata for `{}`; the live branch remains recoverable",
+                worktree.branch()
+            ));
+        }
+        let (session, lane) = if let Some(commit) = merged_commit {
+            (
+                Session::recover_done(cue, persisted.follow_ups.clone(), commit),
+                CueLane::Done,
+            )
+        } else if branch_commit.is_some() {
+            (
+                Session::recover_committed_branch(cue, persisted.follow_ups.clone(), diff),
+                CueLane::Review,
+            )
+        } else {
+            (
+                Session::recover_reviewing(cue, persisted.follow_ups.clone(), diff),
+                CueLane::Review,
+            )
+        };
+        let mut card = CueCard::new(persisted.id, session.cue().clone());
+        card.session = session;
+        card.lane = lane;
+        card.worktree = Some(worktree);
+        card.branch_commit = branch_commit;
+        card.commit_message.clone_from(&persisted.commit_message);
+        Some(card)
+    }
+
+    fn recover_worktrees_without_metadata(
+        &mut self,
+        linked_by_branch: BTreeMap<String, CueWorktree>,
+    ) -> Vec<u64> {
         let mut recovered = Vec::new();
-        for worktree in linked {
+        for worktree in linked_by_branch.into_values() {
             let diff = match worktree
                 .open()
                 .and_then(|workspace| workspace.working_diff())
             {
                 Ok(diff) => diff,
                 Err(error) => {
-                    self.error = Some(format!(
+                    self.append_warning(format!(
                         "could not recover cue branch `{}`: {error}",
                         worktree.branch()
                     ));
@@ -341,14 +527,7 @@ impl CodexDirigentApp {
             recovered.push(id);
             self.cues.push(card);
         }
-        if let Some(id) = recovered.last().copied() {
-            self.selected_cue = Some(id);
-            self.view = AppView::CueDetail;
-            self.error = Some(format!(
-                "Recovered {} unfinished cue worktree(s). Original instructions were not persisted; review each diff carefully.",
-                recovered.len()
-            ));
-        }
+        recovered
     }
 
     fn select_file(&mut self, path: PathBuf) {
@@ -535,6 +714,7 @@ impl CodexDirigentApp {
         self.cue_text.clear();
         self.error = None;
         self.view = AppView::Board;
+        self.save_board();
     }
 
     fn board_ui(&mut self, ui: &mut egui::Ui) {
@@ -755,6 +935,7 @@ impl CodexDirigentApp {
             Ok(run_id) => self.spawn_codex(index, run_id, prompt),
             Err(error) => self.cues[index].error = Some(error.to_string()),
         }
+        self.save_board();
     }
 
     fn run_inbox(&mut self) {
@@ -783,6 +964,7 @@ impl CodexDirigentApp {
                 self.cues[index].follow_up.clear();
                 self.cues[index].lane = CueLane::Run;
                 self.spawn_codex(index, run_id, prompt);
+                self.save_board();
             }
             Err(error) => self.cues[index].error = Some(error.to_string()),
         }
@@ -824,6 +1006,7 @@ impl CodexDirigentApp {
 
     fn poll_codex(&mut self, context: &egui::Context) {
         let mut events = Vec::new();
+        let mut board_changed = false;
         for (index, cue) in self.cues.iter().enumerate() {
             if let Some(run) = &cue.active_run {
                 while let Ok(event) = run.try_recv() {
@@ -841,6 +1024,7 @@ impl CodexDirigentApp {
                     }
                 }
                 CodexEvent::Completed { summary } => {
+                    board_changed = true;
                     let cue = &mut self.cues[index];
                     let run_id = cue.active_run_id.take();
                     cue.active_run = None;
@@ -879,6 +1063,7 @@ impl CodexDirigentApp {
                     }
                 }
                 CodexEvent::Cancelled | CodexEvent::Failed(_) => {
+                    board_changed = true;
                     let message = match event {
                         CodexEvent::Cancelled => "Codex run cancelled".to_owned(),
                         CodexEvent::Failed(message) => message,
@@ -898,6 +1083,9 @@ impl CodexDirigentApp {
                     cue.error = Some(message);
                 }
             }
+        }
+        if board_changed {
+            self.save_board();
         }
         if self.any_running() {
             context.request_repaint_after(std::time::Duration::from_millis(50));
@@ -926,7 +1114,10 @@ impl CodexDirigentApp {
                 .map(|_| ())
                 .map_err(|error| crate::workspace::WorkspaceError::Git(error.to_string()))
         }) {
-            Ok(()) => cue.error = None,
+            Ok(()) => {
+                cue.error = None;
+                self.save_board();
+            }
             Err(error) => cue.error = Some(error.to_string()),
         }
     }
@@ -935,6 +1126,8 @@ impl CodexDirigentApp {
         let Some(index) = self.cues.iter().position(|cue| cue.id == id) else {
             return;
         };
+        let recovered_committed_branch = self.cues[index].branch_commit.is_some()
+            && self.cues[index].session.approval().is_none();
         if self.cues[index].branch_commit.is_none() {
             let approval = self.cues[index].session.approval().cloned();
             let Some(approval) = approval else {
@@ -956,7 +1149,10 @@ impl CodexDirigentApp {
                 },
             );
             match commit {
-                Ok(commit) => self.cues[index].branch_commit = Some(commit),
+                Ok(commit) => {
+                    self.cues[index].branch_commit = Some(commit);
+                    self.save_board();
+                }
                 Err(error) => {
                     self.cues[index].error = Some(error.to_string());
                     return;
@@ -973,13 +1169,19 @@ impl CodexDirigentApp {
         match main.merge_cue(worktree) {
             Ok(commit) => {
                 let cue = &mut self.cues[index];
-                if let Err(error) = cue.session.mark_committed(commit) {
+                let transition = if recovered_committed_branch {
+                    cue.session.mark_recovered_branch_merged(commit)
+                } else {
+                    cue.session.mark_committed(commit)
+                };
+                if let Err(error) = transition {
                     cue.error = Some(error.to_string());
                     return;
                 }
                 cue.lane = CueLane::Done;
                 cue.error = None;
                 self.refresh();
+                self.save_board();
             }
             Err(error) => self.cues[index].error = Some(error.to_string()),
         }
@@ -996,6 +1198,7 @@ impl CodexDirigentApp {
                 self.selected_cue = None;
                 self.view = AppView::Board;
             }
+            self.save_board();
             return;
         };
         let Some(main) = &mut self.workspace else {
@@ -1009,6 +1212,7 @@ impl CodexDirigentApp {
                     self.selected_cue = None;
                     self.view = AppView::Board;
                 }
+                self.save_board();
             }
             Err(error) => self.cues[index].error = Some(error.to_string()),
         }
@@ -1033,6 +1237,7 @@ impl CodexDirigentApp {
                 cue.error = None;
                 self.selected_cue = None;
                 self.view = AppView::Board;
+                self.save_board();
             }
             Err(error) => self.cues[index].error = Some(error.to_string()),
         }
@@ -1059,6 +1264,50 @@ impl CodexDirigentApp {
                     }
                 });
             });
+    }
+
+    fn persisted_board(&self) -> Option<BoardState> {
+        let repository = self.workspace.as_ref()?.root().to_path_buf();
+        let mut state = BoardState::for_repository(repository, self.next_cue_id);
+        state.cues = self
+            .cues
+            .iter()
+            .filter(|cue| {
+                cue.lane != CueLane::Archive && cue.session.state() != &SessionState::Rejected
+            })
+            .map(|card| {
+                let lane = match card.lane {
+                    CueLane::Inbox => PersistedLane::Inbox,
+                    CueLane::Run => PersistedLane::Run,
+                    CueLane::Review => PersistedLane::Review,
+                    CueLane::Done => PersistedLane::Done,
+                    CueLane::Archive => unreachable!("archived cues were filtered"),
+                };
+                let mut cue = PersistedCue::new(card.id, lane, card.session.cue());
+                cue.follow_ups = card.session.user_follow_ups().map(str::to_owned).collect();
+                cue.worktree_branch = card
+                    .worktree
+                    .as_ref()
+                    .map(|worktree| worktree.branch().to_owned());
+                cue.branch_commit.clone_from(&card.branch_commit);
+                cue.merged_commit = match card.session.state() {
+                    SessionState::Committed { commit } => Some(commit.clone()),
+                    _ => None,
+                };
+                cue.commit_message.clone_from(&card.commit_message);
+                cue
+            })
+            .collect();
+        Some(state)
+    }
+
+    fn save_board(&mut self) {
+        let (Some(path), Some(state)) = (self.board_path.clone(), self.persisted_board()) else {
+            return;
+        };
+        if let Err(error) = board::save(&path, &state) {
+            self.append_warning(error.to_string());
+        }
     }
 
     fn save_settings(&mut self) {
@@ -1189,6 +1438,15 @@ fn render_card(ui: &mut egui::Ui, cue: &mut CueCard) -> Option<CardAction> {
         }
     });
     action
+}
+
+fn branch_commit_is_live(worktree: &CueWorktree, expected_commit: &str) -> bool {
+    worktree.open().is_ok_and(|workspace| {
+        workspace.is_clean().unwrap_or(false)
+            && workspace
+                .head_commit()
+                .is_ok_and(|commit| commit == expected_commit)
+    })
 }
 
 fn cues_in_lane_newest_first(
@@ -1432,6 +1690,162 @@ mod tests {
 
         app.reject_cue(app.cues[0].id);
         assert_eq!(app.cues[0].lane, CueLane::Archive);
+    }
+
+    #[test]
+    fn persisted_inbox_recovers_instruction_and_exact_target() {
+        let repository = repository();
+        let state_directory = tempfile::tempdir().unwrap();
+        let board_path = state_directory.path().join(board::FILE_NAME);
+        let cue = Cue::new(
+            "Explain this boundary",
+            CueTarget::Lines {
+                path: PathBuf::from("README.md"),
+                start: 1,
+                end: 1,
+            },
+        )
+        .unwrap();
+        let mut first = CodexDirigentApp {
+            workspace: Some(Workspace::open(repository.path()).unwrap()),
+            board_path: Some(board_path.clone()),
+            next_cue_id: 2,
+            ..CodexDirigentApp::default()
+        };
+        first.cues.push(CueCard::new(1, cue.clone()));
+        first.save_board();
+
+        let mut restarted = CodexDirigentApp {
+            board_path: Some(board_path.clone()),
+            loaded_board: Some(board::load(&board_path).unwrap()),
+            ..CodexDirigentApp::default()
+        };
+        restarted.open_repository(repository.path());
+
+        assert_eq!(restarted.cues.len(), 1);
+        assert_eq!(restarted.cues[0].lane, CueLane::Inbox);
+        assert_eq!(restarted.cues[0].session.cue(), &cue);
+        assert!(restarted.cues[0].worktree.is_none());
+        assert_eq!(restarted.next_cue_id, 2);
+    }
+
+    #[test]
+    fn persisted_conversation_recovers_user_history_without_generated_output() {
+        let repository = repository();
+        let main = Workspace::open(repository.path()).unwrap();
+        let worktree = main.create_cue_worktree(9).unwrap();
+        fs::write(worktree.path().join("README.md"), "durable change\n").unwrap();
+        let diff = worktree.open().unwrap().working_diff().unwrap();
+        let cue = Cue::new(
+            "Change the heading",
+            CueTarget::File(PathBuf::from("README.md")),
+        )
+        .unwrap();
+        let mut session = Session::new(cue.clone());
+        let first_run = session.begin_run().unwrap();
+        session
+            .finish_run(first_run, "generated first summary", &diff)
+            .unwrap();
+        let second_run = session.follow_up("Keep the example concise").unwrap();
+        session
+            .finish_run(second_run, "generated second summary", &diff)
+            .unwrap();
+        let mut card = CueCard::new(9, cue.clone());
+        card.session = session;
+        card.lane = CueLane::Review;
+        card.worktree = Some(worktree);
+        let state_directory = tempfile::tempdir().unwrap();
+        let board_path = state_directory.path().join(board::FILE_NAME);
+        let mut first = CodexDirigentApp {
+            workspace: Some(main),
+            board_path: Some(board_path.clone()),
+            next_cue_id: 10,
+            ..CodexDirigentApp::default()
+        };
+        first.cues.push(card);
+        first.save_board();
+
+        let serialized = fs::read_to_string(&board_path).unwrap();
+        assert!(!serialized.contains("generated first summary"));
+        assert!(!serialized.contains("generated second summary"));
+        assert!(!serialized.contains("durable change"));
+        let mut restarted = CodexDirigentApp {
+            board_path: Some(board_path.clone()),
+            loaded_board: Some(board::load(&board_path).unwrap()),
+            ..CodexDirigentApp::default()
+        };
+        restarted.open_repository(repository.path());
+
+        let recovered = &restarted.cues[0];
+        assert_eq!(recovered.session.cue(), &cue);
+        assert_eq!(
+            recovered
+                .session
+                .messages()
+                .iter()
+                .map(|message| message.text.as_str())
+                .collect::<Vec<_>>(),
+            ["Change the heading", "Keep the example concise"]
+        );
+        assert!(recovered.session.review_diff().contains("durable change"));
+        assert!(matches!(
+            recovered.session.state(),
+            SessionState::Reviewing { .. }
+        ));
+
+        restarted.reject_cue(9);
+    }
+
+    #[test]
+    fn stale_persisted_active_cue_cannot_fabricate_a_worktree() {
+        let repository = repository();
+        let root = Workspace::open(repository.path())
+            .unwrap()
+            .root()
+            .to_path_buf();
+        let cue = Cue::new("Stale task", CueTarget::Repository).unwrap();
+        let mut persisted = PersistedCue::new(5, PersistedLane::Review, &cue);
+        persisted.worktree_branch = Some("codex-dirigent/cue-5-missing".to_owned());
+        let mut state = BoardState::for_repository(root, 6);
+        state.cues.push(persisted);
+        let state_directory = tempfile::tempdir().unwrap();
+        let board_path = state_directory.path().join(board::FILE_NAME);
+        board::save(&board_path, &state).unwrap();
+        let mut restarted = CodexDirigentApp {
+            board_path: Some(board_path.clone()),
+            loaded_board: Some(board::load(&board_path).unwrap()),
+            ..CodexDirigentApp::default()
+        };
+
+        restarted.open_repository(repository.path());
+
+        assert!(restarted.cues.is_empty());
+        assert!(
+            restarted
+                .error
+                .as_deref()
+                .unwrap()
+                .contains("stale persisted")
+        );
+    }
+
+    #[test]
+    fn archived_and_rejected_cards_are_removed_from_active_persistence() {
+        let repository = repository();
+        let mut archived = CueCard::new(1, Cue::new("Archived", CueTarget::Repository).unwrap());
+        archived.lane = CueLane::Archive;
+        let mut rejected = CueCard::new(2, Cue::new("Rejected", CueTarget::Repository).unwrap());
+        let run = rejected.session.begin_run().unwrap();
+        rejected.session.finish_run(run, "done", "diff").unwrap();
+        rejected.session.reject().unwrap();
+        rejected.lane = CueLane::Review;
+        let app = CodexDirigentApp {
+            workspace: Some(Workspace::open(repository.path()).unwrap()),
+            cues: vec![archived, rejected],
+            ..CodexDirigentApp::default()
+        };
+
+        assert!(app.persisted_board().unwrap().cues.is_empty());
     }
 
     #[test]

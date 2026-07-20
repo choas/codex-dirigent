@@ -128,6 +128,35 @@ impl Workspace {
         &self.branch
     }
 
+    /// Return the commit currently checked out by this worktree.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when Git cannot resolve `HEAD`.
+    pub fn head_commit(&self) -> Result<String> {
+        Ok(git_text(&self.root, ["rev-parse", "HEAD"])?
+            .trim()
+            .to_owned())
+    }
+
+    /// Report whether `commit` is contained in the current `HEAD` history.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when Git cannot perform the ancestry check.
+    pub fn contains_commit(&self, commit: &str) -> Result<bool> {
+        let output = Command::new("git")
+            .args(["merge-base", "--is-ancestor", commit, "HEAD"])
+            .current_dir(&self.root)
+            .env("LC_ALL", "C")
+            .output()?;
+        match output.status.code() {
+            Some(0) => Ok(true),
+            Some(1) => Ok(false),
+            _ => Err(git_error(&output)),
+        }
+    }
+
     /// Refresh the file list, status markers, and branch name.
     ///
     /// # Errors

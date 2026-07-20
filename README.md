@@ -68,11 +68,13 @@ cues remain. A stale worker result cannot replace a newer run. Rejection has a
 confirmation dialog, removes only that cue's isolated worktree and branch, and
 never modifies `main`.
 
-After a restart, linked cue worktrees are rediscovered and opened directly in
-Review so their diffs can still be accepted, rejected, committed, or merged.
-The original instruction is currently unavailable after recovery, so recovered
-cards identify their branch and require careful diff review. Inbox-only cues
-still remain session-local because they have no Git worktree to recover.
+After a restart, Inbox cues return with their repository, file, or line-range
+targets intact. Started cards are reconciled by branch name against Git's live
+linked-worktree list before they can return to Review or Done; stale saved state
+cannot create a reviewable worktree. Original instructions and user follow-up
+history are restored, while the current review diff is regenerated from the
+worktree. A linked worktree without saved metadata still uses the conservative
+recovery card and requires careful diff review.
 
 If an opened repository is moved or removed, starting a cue reports the missing
 repository path and asks you to reopen its current location instead of showing a
@@ -101,6 +103,14 @@ Settings are atomically saved at
 are ignored, and an invalid file produces a visible warning while the app starts
 with safe defaults.
 
+The active cue board is stored atomically beside settings as the versioned
+`cue-board.json`. It contains repository identity, cue IDs and lanes, exact cue
+targets, user-authored instructions and follow-ups, and linked branch metadata.
+It does not contain environment values or other secrets supplied to subprocesses,
+Codex progress or summaries, generated diffs, subprocess handles, or exact-diff
+approval tokens. Unknown fields are ignored. Invalid or unsupported state shows
+a warning and starts with an empty board instead of blocking launch.
+
 ## Create a macOS app bundle
 
 ```sh
@@ -122,6 +132,7 @@ and `target` content is not committed.
 - `review`: run/follow-up/review state machine and exact-diff approval token
 - `codex`: direct CLI process lifecycle, JSON progress, hooks, and cancellation
 - `settings`: minimal Serde model with atomic persistence
+- `board`: narrow versioned Serde schema, atomic cue persistence, and safe loading
 - `app`: native workflow UI and macOS interactions
 
 The clean-start design audit and retained/excluded scope are recorded in
@@ -136,9 +147,9 @@ The clean-start design audit and retained/excluded scope are recorded in
   creating or merging cues.
 - Merge conflicts cannot be silently eliminated. They are detected before main
   is changed and shown on the Review card so the cue branch remains recoverable.
-- Inbox-only cue state is currently session-local. Started cues are recovered
-  from their linked Git worktrees after restart, but their original instructions
-  and conversation history are not yet persisted.
+- Codex-generated summaries and progress are intentionally not restored after a
+  restart; durable conversation history is limited to user-authored instructions
+  and follow-ups. Review diffs are regenerated from live linked worktrees.
 - Visual smoke testing requires an interactive macOS session with screen
   recording permission; automated checks cover the domain and subprocess paths.
 
