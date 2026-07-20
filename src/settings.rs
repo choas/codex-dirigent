@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use crate::codex::CodexConfig;
+use crate::codex::{CodexConfig, DEFAULT_MODEL};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
@@ -25,7 +25,7 @@ impl Default for Settings {
     fn default() -> Self {
         Self {
             codex_cli_path: "codex".to_owned(),
-            codex_model: String::new(),
+            codex_model: DEFAULT_MODEL.to_owned(),
             codex_extra_arguments: String::new(),
             codex_environment_names: String::new(),
             codex_pre_run_command: String::new(),
@@ -85,7 +85,13 @@ pub fn default_path() -> Result<PathBuf, SettingsError> {
 /// Returns an error when the file cannot be read or its JSON/types are invalid.
 pub fn load(path: &Path) -> Result<Settings, SettingsError> {
     match fs::read(path) {
-        Ok(bytes) => Ok(serde_json::from_slice(&bytes)?),
+        Ok(bytes) => {
+            let mut settings: Settings = serde_json::from_slice(&bytes)?;
+            if settings.codex_model.trim().is_empty() {
+                DEFAULT_MODEL.clone_into(&mut settings.codex_model);
+            }
+            Ok(settings)
+        }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Settings::default()),
         Err(error) => Err(SettingsError::Io(error)),
     }
@@ -156,5 +162,17 @@ mod tests {
         let path = temp.path().join("settings.json");
         fs::write(&path, b"{not json").unwrap();
         assert!(matches!(load(&path), Err(SettingsError::Invalid(_))));
+    }
+
+    #[test]
+    fn blank_persisted_model_migrates_to_gpt_5_6() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("settings.json");
+        fs::write(&path, r#"{"codex_model":"  "}"#).unwrap();
+
+        let settings = load(&path).unwrap();
+
+        assert_eq!(settings.codex_model, DEFAULT_MODEL);
+        assert_eq!(settings.codex_config().model, DEFAULT_MODEL);
     }
 }

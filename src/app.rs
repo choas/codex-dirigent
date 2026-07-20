@@ -1083,7 +1083,7 @@ impl CodexDirigentApp {
             .show(context, |ui| {
                 ui.label("Codex CLI path");
                 ui.text_edit_singleline(&mut self.settings.codex_cli_path);
-                ui.label("Model (blank uses Codex configuration)");
+                ui.label("Model (defaults to GPT-5.6)");
                 ui.text_edit_singleline(&mut self.settings.codex_model);
                 ui.label("Extra arguments");
                 ui.text_edit_singleline(&mut self.settings.codex_extra_arguments);

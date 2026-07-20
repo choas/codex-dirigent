@@ -12,6 +12,7 @@ use crate::cue::Cue;
 use crate::review::{Message, Speaker};
 
 const POLL_INTERVAL: Duration = Duration::from_millis(75);
+pub const DEFAULT_MODEL: &str = "gpt-5.6";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CodexConfig {
@@ -30,7 +31,7 @@ impl Default for CodexConfig {
     fn default() -> Self {
         Self {
             cli_path: PathBuf::from("codex"),
-            model: String::new(),
+            model: DEFAULT_MODEL.to_owned(),
             extra_arguments: String::new(),
             environment_names: Vec::new(),
             pre_run_command: String::new(),
