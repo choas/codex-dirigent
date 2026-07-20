@@ -165,7 +165,7 @@ mod tests {
     }
 
     #[test]
-    fn blank_persisted_model_migrates_to_gpt_5_6() {
+    fn blank_persisted_model_migrates_to_supported_gpt_5_6_variant() {
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("settings.json");
         fs::write(&path, r#"{"codex_model":"  "}"#).unwrap();

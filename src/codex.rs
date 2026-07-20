@@ -12,7 +12,7 @@ use crate::cue::Cue;
 use crate::review::{Message, Speaker};
 
 const POLL_INTERVAL: Duration = Duration::from_millis(75);
-pub const DEFAULT_MODEL: &str = "gpt-5.6";
+pub const DEFAULT_MODEL: &str = "gpt-5.6-sol";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CodexConfig {

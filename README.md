@@ -86,7 +86,8 @@ confirmation.
 
 The compact settings sheet contains only execution inputs used by Codex:
 
-- CLI path and model, defaulting explicitly to `gpt-5.6`
+- CLI path and model, defaulting explicitly to the Codex-supported GPT-5.6
+  identifier `gpt-5.6-sol`
 - extra `codex exec` arguments
 - environment variable names, one per line
 - one direct pre-run command and one direct post-run command
